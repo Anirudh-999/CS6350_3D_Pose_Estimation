@@ -14,6 +14,19 @@ def extract_features_sift(img_rgb: np.ndarray):
 
     kps, desc = sift.detectAndCompute(gray, None)
 
+    # Subpixel refinement
+    if len(kps) > 0:
+        corners = np.array([kp.pt for kp in kps], dtype=np.float32).reshape(-1, 1, 2)
+        refined_corners = cv2.cornerSubPix(
+            gray,
+            corners,
+            winSize=(5, 5),
+            zeroZone=(-1, -1),
+            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.01),
+        )
+        for i, kp in enumerate(kps):
+            kp.pt = tuple(refined_corners[i, 0])
+
     return kps, desc
 
 def extract_features_orb(img_rgb: np.ndarray):

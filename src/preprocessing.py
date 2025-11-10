@@ -46,3 +46,22 @@ def detect_yolo(img_rgb: np.ndarray, weights_path = "yolov8l", conf=0.1, imgsz=6
     except Exception as e:
         warn(f"YOLO inference failed: {e}")
         return np.empty((0,4)), np.array([]), np.array([])
+
+def refine_matches_photometric(img1, img2, pts1):
+    """
+    Refine matches using Lucas-Kanade optical flow for subpixel accuracy.
+    """
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
+
+    pts1 = np.array(pts1, dtype=np.float32).reshape(-1, 1, 2)
+    pts2, st, err = cv2.calcOpticalFlowPyrLK(gray1, gray2, pts1, None, 
+                                             winSize=(15, 15),
+                                             maxLevel=3,
+                                             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+    # Filter points with valid status
+    valid = st.ravel() == 1
+    pts1_refined = pts1[valid].reshape(-1, 2)
+    pts2_refined = pts2[valid].reshape(-1, 2)
+
+    return pts1_refined, pts2_refined

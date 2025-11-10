@@ -33,22 +33,7 @@ USE_GPU        = True             # preference flag
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-
-# _SPG_AVAILABLE = False
-# try:
-#     import superpoint 
-#     import superglue
-#     _SPG_AVAILABLE = True
-# except Exception:
-#     _SPG_AVAILABLE = False
-
-
-
-# print(f"YOLO available: {_YOLO_AVAILABLE}, MiDaS: {_MIDAS_AVAILABLE}, RAFT: {_RRAFT_AVAILABLE}, SPG: {_SPG_AVAILABLE}, Open3D: {_O3D_AVAILABLE}")
-
-
-
-def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_weights=YOLO_WEIGHTS):
+def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_weights=YOLO_WEIGHTS, gt_pose_cur = None, gt_pose_next = None):
     t0 = time.time()
     
     if os.path.exists(left_path) and os.path.exists(right_path):
@@ -132,16 +117,16 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
 
     results = []
     # A helper to process a region pair (roiL, roiR) with origins
-    def process_region(roiL, roiR, originL=(0,0), originR=(0,0), R_ref=None):
+    def process_region(roiL, roiR, originL=(0,0), originR=(0,0), R_ref=None, obj_class="unknown"):
         res = {}
         # features
         kpsL, descL = extract_features_sift(roiL)
         kpsR, descR = extract_features_sift(roiR)
-        visualize_keypoints(roiL, kpsL, "07_roiL_kps.png", "ROI Left Keypoints")
-        visualize_keypoints(roiR, kpsR, "08_roiR_kps.png", "ROI Right Keypoints")
+        visualize_keypoints(roiL, kpsL, f"07_roiL_kps_{obj_class}.png", f"ROI Left Keypoints ({obj_class})")
+        visualize_keypoints(roiR, kpsR, f"08_roiR_kps_{obj_class}.png", f"ROI Right Keypoints ({obj_class})")
         # matches
         matches = match_descriptors_flann(descL, descR)
-        draw_matches(roiL, kpsL, roiR, kpsR, matches, max_matches=300, fname="09_roi_matches.png", title="ROI Matches")
+        draw_matches(roiL, kpsL, roiR, kpsR, matches, max_matches=300, fname=f"09_roi_matches_{obj_class}.png", title=f"ROI Matches ({obj_class})")
         if len(matches) < 8:
             warn(f"Only {len(matches)} good matches in ROI; may be insufficient.")
         # build point arrays (global coords)
@@ -153,40 +138,14 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
         F, maskF = estimate_fundamental(ptsL, ptsR)
         if F is not None:
             mask_in = maskF.ravel().astype(bool)
-            draw_epipolar_lines(L, R, ptsL[mask_in][:30], ptsR[mask_in][:30], F, "10_epilines.png")
+            draw_epipolar_lines(L, R, ptsL[mask_in][:30], ptsR[mask_in][:30], F, f"10_epilines_{obj_class}.png")
         # essential & pose
         K = calib.get('K0') if 'K0' in calib else calib.get('K') if 'K' in calib else None
         R_est, t_est, mask_pose = estimate_essential_and_pose(ptsL, ptsR, K)
         res['R'] = R_est
         res['t'] = t_est
-        # triangulate if possible
-        # P1 = calib.get('P0') if 'P0' in calib else (np.hstack((K, np.zeros((3,1)))) if K is not None else None)
-        # P2 = calib.get('P1') if 'P1' in calib else (np.hstack((K@R_est, K@t_est)) if (K is not None and R_est is not None and t_est is not None) else None)
-        # if P1 is not None and P2 is not None and ptsL.shape[0] > 0:
-        #     try:
-        #         pts3d = triangulate_with_P(ptsL[mask_pose] if mask_pose is not None else ptsL, ptsR[mask_pose] if mask_pose is not None else ptsR, P1, P2)
-        #         res['pts3d'] = pts3d
-        #         info(f"Triangulated {pts3d.shape[0]} points.")
-        #         # visualize 3D XY scatter
-        #         if pts3d.shape[0] > 0:
-        #             fig = plt.figure(figsize=(6,4))
-        #             ax = fig.add_subplot(111, projection='3d')
-        #             ax.scatter(pts3d[:,0], pts3d[:,1], pts3d[:,2], s=1)
-        #             ax.set_title("Triangulated points")
-        #             fname = os.path.join(OUTPUT_DIR, "11_tri_scatter.png")
-        #             fig.savefig(fname, dpi=150)
-        #             plt.close(fig)
-        #             info(f"Saved 3D scatter: {fname}")
-        #     except Exception as e:
-        #         warn(f"Triangulation failed: {e}")
-        # else:
-        #     warn("P1/P2 not available or insufficient K/R/t to triangulate metric points.")
-        #     res['pts3d'] = np.empty((0,3))
-        # yaw estimates
         yaw_fromR = yaw_from_R(res['R'], R_ref) if res['R'] is not None else {}
-        # yaw_pca = yaw_from_pointcloud_pca(res['pts3d']) if res['pts3d'].shape[0] > 0 else None
         res['yaw_fromR'] = yaw_fromR
-        # res['yaw_pca'] = yaw_pca
         return res
 
     # Extract features from the images
@@ -234,10 +193,33 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
     delta_pose, best_params = estimate_pose_from_points(points_img1, points_img2)
 
     # Print the predicted rotations
+        # Print the predicted rotations
     print("Predicted Rotations:")
     print(f"Δα (Tilt): {delta_pose[0]:.2f}°")
     print(f"Δβ (Yaw): {delta_pose[1]:.2f}°")
     print(f"Δγ (Roll): {delta_pose[2]:.2f}°")
+
+    # ---- Pose Evaluation ----
+    # If you have ground truth for this pair (from rgb_paths in the caller), evaluate it
+    from epipolar_geometry import evaluate_pose_accuracy
+
+    # Extract ground truth if available from outer scope (safe fallback)
+    try:
+        if gt_pose_next is not None and gt_pose_cur is not None:
+            # Compute ground truth relative motion (R_gt_rel, t_gt_rel)
+            R_next = np.array(gt_pose_next[3])
+            R_cur  = np.array(gt_pose_cur[3])
+            t_next = np.array(gt_pose_next[4])
+            t_cur  = np.array(gt_pose_cur[4])
+            R_gt_rel = R_next @ R_cur.T
+            t_gt_rel = (t_next - R_gt_rel @ t_cur).reshape(3,1)
+            if 'R' in res and 't' in res:
+                metrics = evaluate_pose_accuracy(res['R'], res['t'], R_gt_rel, t_gt_rel, res.get('ptsL'), res.get('ptsR'))
+                print("Pose Evaluation Metrics:")
+                print(metrics)
+    except Exception as e:
+        warn(f"Could not evaluate ground-truth pose: {e}")
+
 
     # Process either per-object or whole-image
     if use_per_object:
@@ -246,8 +228,9 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
             x1,y1,x2,y2 = map(max, (0,0,0,0), bL); X1,Y1,X2,Y2 = map(min, (L.shape[1],L.shape[0],R.shape[1],R.shape[0]), bR)
             roiL = L[y1:y2, x1:x2]
             roiR = R[Y1:Y2, X1:X2]
-            info(f"Processing object ROI L#{iL} size {roiL.shape} / R#{iR} size {roiR.shape}")
-            res = process_region(roiL, roiR, (x1,y1), (X1,Y1))
+            obj_class = clsL[iL] if iL < len(clsL) else "Unknown"
+            info(f"Processing object ROI L#{iL} (class: {obj_class}) size {roiL.shape} / R#{iR} size {roiR.shape}")
+            res = process_region(roiL, roiR, (x1,y1), (X1,Y1), obj_class=obj_class)
             res['pair'] = (iL,iR)
             results.append(res)
     else:
@@ -291,13 +274,3 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
 
     info(f"Total runtime: {time.time()-t0:.2f}s")
     return results
-
-# # ---------- Run ----------
-# if __name__ == "__main__":
-#     start_time = time.time()
-#     try:
-#         results = run_pipeline(LEFT_IMG_PATH, RIGHT_IMG_PATH, CALIB_PATH, YOLO_WEIGHTS)
-#     except Exception as e:
-#         err(f"Unhandled exception: {e}")
-#         raise
-#     info(f"Done. Script runtime: {time.time()-start_time:.2f}s")

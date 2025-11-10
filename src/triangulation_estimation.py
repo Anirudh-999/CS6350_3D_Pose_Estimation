@@ -1,7 +1,7 @@
-
 from custom_logging import info, warn
 import numpy as np
 import cv2
+from scipy.optimize import least_squares
 
 try:
     import open3d as o3d
@@ -92,3 +92,52 @@ def icp_refine(observed_pts, model_pts, init=np.eye(4)):
                                                      o3d.pipelines.registration.TransformationEstimationPointToPlane())
     info(f"ICP done: fitness={reg.fitness:.4f}, rmse={reg.inlier_rmse:.4f}")
     return reg.transformation
+
+def bundle_adjustment(pts1, pts2, K, R, t):
+    """
+    Refine R, t by minimizing geometric reprojection error.
+    """
+    def reprojection_error(params, pts1, pts2, K):
+        R_vec = params[:3]
+        t = params[3:]
+        R, _ = cv2.Rodrigues(R_vec)
+        P1 = K @ np.hstack((np.eye(3), np.zeros((3, 1))))
+        P2 = K @ np.hstack((R, t.reshape(3, 1)))
+        pts1_h = cv2.convertPointsToHomogeneous(pts1).reshape(-1, 3).T
+        pts2_h = cv2.convertPointsToHomogeneous(pts2).reshape(-1, 3).T
+        proj1 = P1 @ pts1_h
+        proj2 = P2 @ pts2_h
+        proj1 /= proj1[2]
+        proj2 /= proj2[2]
+        error = np.linalg.norm(proj1[:2] - proj2[:2], axis=0)
+        return error
+
+    # Initial parameters
+    R_vec, _ = cv2.Rodrigues(R)
+    params_init = np.hstack((R_vec.ravel(), t.ravel()))
+
+    # Optimize
+    result = least_squares(reprojection_error, params_init, args=(pts1, pts2, K))
+    R_refined, _ = cv2.Rodrigues(result.x[:3])
+    t_refined = result.x[3:]
+
+    return R_refined, t_refined
+
+def refine_pose_with_bundle_adjustment(pts1, pts2, K, R, t):
+    """
+    Wrapper for bundle adjustment to refine pose parameters.
+    Args:
+        pts1: Nx2 array of points in image 1.
+        pts2: Nx2 array of points in image 2.
+        K: Camera intrinsic matrix.
+        R: Initial rotation matrix.
+        t: Initial translation vector.
+    Returns:
+        Refined rotation matrix and translation vector.
+    """
+    info("Starting bundle adjustment to refine pose parameters.")
+    R_refined, t_refined = bundle_adjustment(pts1, pts2, K, R, t)
+    info("Bundle adjustment completed.")
+    info(f"Refined Rotation Matrix:\n{R_refined}")
+    info(f"Refined Translation Vector:\n{t_refined}")
+    return R_refined, t_refined

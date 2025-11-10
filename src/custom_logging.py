@@ -2,7 +2,7 @@ from matplotlib import pyplot as plt
 import os
 import logging
 import cv2
-
+LOGGING_ENABLED = False
 # LEFT_IMG_PATH  = "images/img2.png"      # path to left image
 # RIGHT_IMG_PATH = "images/img1.png"      # path to right image
 
@@ -18,13 +18,16 @@ USE_GPU        = True             # preference flag
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def info(message: str):
-    logging.info(message)
+    if LOGGING_ENABLED:
+        logging.info(message)
 
 def warn(message: str):
-    logging.warning(message)
+    if LOGGING_ENABLED:
+        logging.warning(message)
 
 def err(message: str):
-    logging.error(message)
+    if LOGGING_ENABLED:        
+        logging.error(message)
 
 def show_and_save(img_rgb, title: str, fname: str, output_dir: str = OUTPUT_DIR):
     """
