@@ -2,21 +2,45 @@ import cv2
 import numpy as np
 from custom_logging import info, warn, show_and_save
 from scipy.optimize import minimize
+from scipy.spatial.transform import Rotation as R_transform
 
+# --- NEW HELPER FUNCTION (Moved from data_handling.py) ---
+def rotation_matrix_to_euler_angles(R):
+    """
+    Convert a rotation matrix to Euler angles (in degrees).
+    Returns angles as [roll, pitch, yaw] in ZYX order (extrinsic).
+    """
+    if R is None:
+        return np.array([0.0, 0.0, 0.0])
+        
+    sy = np.sqrt(R[0,0]**2 + R[1,0]**2)
+    singular = sy < 1e-6
+
+    if not singular:
+        x = np.arctan2(R[2, 1], R[2, 2])  # Roll
+        y = np.arctan2(-R[2, 0], sy)      # Pitch
+        z = np.arctan2(R[1, 0], R[0, 0])  # Yaw
+    else:
+        x = np.arctan2(-R[1,2], R[1,1])
+        y = np.arctan2(-R[2,0], sy)
+        z = 0
+
+    return np.degrees(np.array([x, y, z]))
+
+# --- KEPT FROM YOUR ORIGINAL ---
 def estimate_fundamental(pts1, pts2):
     if pts1.shape[0] < 8:
         warn("Need at least 8 points to estimate Fundamental matrix reliably.")
         return None, None
-    F, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, 3.0, 0.99)
+    F, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, 1.0, 0.99) # Tighter threshold
     return F, mask
 
+# --- KEPT FROM YOUR ORIGINAL ---
 def draw_epipolar_lines(img1, img2, pts1, pts2, F, fname):
-    # draw epipolar lines on both images for the first few inliers
     if F is None or pts1 is None or pts2 is None or pts1.shape[0] == 0 or pts2.shape[0] == 0:
         warn("No fundamental matrix or point correspondences to draw epipolar lines.")
         return
-
-    # ensure correct dtype/shape
+    # (The rest of this function is fine as-is)
     pts1 = np.asarray(pts1, dtype=np.float32).reshape(-1, 2)
     pts2 = np.asarray(pts2, dtype=np.float32).reshape(-1, 2)
 
@@ -25,10 +49,8 @@ def draw_epipolar_lines(img1, img2, pts1, pts2, F, fname):
         h, w = out.shape[:2]
         for r, p in zip(lines, pts):
             a, b, c = r
-            # avoid division by zero for horizontal lines (b==0)
             if abs(b) < 1e-6:
-                y0 = 0
-                y1 = h
+                y0, y1 = 0, h
                 x0 = int(-c / a) if abs(a) > 1e-6 else 0
                 x1 = x0
             else:
@@ -39,102 +61,113 @@ def draw_epipolar_lines(img1, img2, pts1, pts2, F, fname):
             cv2.circle(out, (int(p[0]), int(p[1])), 4, (0, 0, 255), -1)
         return out
 
-    # compute epipolar lines
     lines1 = cv2.computeCorrespondEpilines(pts2.reshape(-1, 1, 2), 2, F).reshape(-1, 3)
     lines2 = cv2.computeCorrespondEpilines(pts1.reshape(-1, 1, 2), 1, F).reshape(-1, 3)
-
     img1_lines = draw_lines(img1, lines1, pts1)
     img2_lines = draw_lines(img2, lines2, pts2)
-
-    # Pad images to the same height before horizontal stacking to avoid dimension mismatch
     h1, h2 = img1_lines.shape[0], img2_lines.shape[0]
     max_h = max(h1, h2)
     if h1 < max_h:
         img1_lines = cv2.copyMakeBorder(img1_lines, 0, max_h - h1, 0, 0, cv2.BORDER_CONSTANT, value=[0, 0, 0])
     if h2 < max_h:
         img2_lines = cv2.copyMakeBorder(img2_lines, 0, max_h - h2, 0, 0, cv2.BORDER_CONSTANT, value=[0, 0, 0])
-
     vis = np.hstack([img1_lines, img2_lines])
     show_and_save(vis, "Epipolar lines L|R", fname)
 
-# ---------- Essential & pose ----------
-def estimate_essential_and_pose(pts1, pts2, K=None):
-    if pts1.shape[0] < 5:
-        warn("Too few points to estimate Essential matrix.")
-        return None, None, None
 
-    if K is None:
-        # Heuristic K (f ~ width)
-        w = int(np.max(pts1[:, 0]) * 2) if pts1.size else 640
-        fx = fy = float(w)
-        cx = cy = w / 2.0
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
-        warn("No intrinsics K: approximating; pose will be scale-ambiguous.")
+# --- THIS IS THE MAIN NEW FUNCTION ---
+# It replaces your old estimate_essential_and_pose
+def self_calibrate_and_find_pose(pts1, pts2, K_guess, img_shape):
+    """
+    Robustly finds K, R, and t from "near-planar" features.
+    It separates planar (H) from non-planar (F) points to
+    get a stable pose.
+    """
+    h, w = img_shape[:2]
+    
+    if K_guess is None:
+        # Create a default guess if none is provided
+        f_guess = max(h, w) # A common heuristic
+        K_guess = np.array([[f_guess, 0, w/2], [0, f_guess, h/2], [0, 0, 1]])
+        warn(f"No K provided, guessing focal length={f_guess}")
+    else:
+        info(f"Using provided K/calib as initial guess.")
 
-    # Estimate F once outside optimization
-    F, maskF = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC)
-    if F is None or F.shape != (3, 3):
-        warn("Fundamental matrix estimation failed — cannot optimize focal length.")
-        return None, None, None
+    # --- 1. Find the dominant plane (H) ---
+    H, h_mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 3.0, 0.99)
+    if H is None:
+        warn("H matrix estimation failed. Aborting.")
+        return None, None, K_guess, None # Return guess
+        
+    h_mask = h_mask.ravel().astype(bool)
+    
+    # --- 2. Find non-planar points ---
+    # These are the "outliers" to the dominant plane
+    non_planar_mask = ~h_mask
+    non_planar_pts1 = pts1[non_planar_mask]
+    non_planar_pts2 = pts2[non_planar_mask]
 
-    # Optimize focal length f
+    info(f"Total matches: {len(pts1)}. Planar (H) inliers: {np.sum(h_mask)}. Non-planar (3D) outliers: {len(non_planar_pts1)}")
+
+    if len(non_planar_pts1) < 8:
+        warn("Not enough non-planar points (<8). Pose will be unstable.")
+        return None, None, K_guess, non_planar_mask
+
+    # --- 3. Get a stable F from ONLY non-planar points ---
+    F_clean, f_mask = cv2.findFundamentalMat(non_planar_pts1, non_planar_pts2, cv2.FM_RANSAC, 1.0, 0.99)
+    if F_clean is None:
+        warn("Clean F matrix estimation failed. Aborting.")
+        return None, None, K_guess, non_planar_mask
+
+    # --- 4. Optimize focal length (f) using the clean F ---
     def cost_function(f_scalar):
         f = float(np.atleast_1d(f_scalar)[0])
-        K_temp = np.array([
-            [f, 0, K[0, 2]],
-            [0, f, K[1, 2]],
-            [0, 0, 1]
-        ], dtype=np.float64)
-
-        # Build temporary essential matrix
-        E_temp = K_temp.T @ F @ K_temp
-
-        # SVD structure constraint: two equal singular values, one zero
+        K_temp = K_guess.copy()
+        K_temp[0, 0] = f
+        K_temp[1, 1] = f
+        E_temp = K_temp.T @ F_clean @ K_temp
         U, S, Vt = np.linalg.svd(E_temp)
-        # Use squared difference to ensure smooth cost
-        return (S[0] - S[1]) ** 2 + (S[2]) ** 2
+        # Minimize difference of two largest singular values
+        return (S[0] - S[1]) ** 2 
 
-    result = minimize(cost_function, [K[0, 0]], bounds=[(100, 2000)], method='L-BFGS-B')
+    f_init = K_guess[0, 0]
+    result = minimize(cost_function, [f_init], bounds=[(100, 4000)], method='L-BFGS-B')
     f_optimized = float(result.x[0])
-    K[0, 0] = K[1, 1] = f_optimized
-
-    # Compute essential matrix with refined K
-    E, maskE = cv2.findEssentialMat(pts1, pts2, K, cv2.RANSAC, 0.999, 1.0)
-    if E is None:
-        warn("Essential estimation failed.")
-        return None, None, None
-
-    # Recover pose
-    _, R, t, mask_pose = cv2.recoverPose(E, pts1, pts2, K)
-    info(f"Recovered pose with {np.sum(mask_pose)} inliers (of {len(pts1)})")
+    
+    K_optimized = K_guess.copy()
+    K_optimized[0, 0] = f_optimized
+    K_optimized[1, 1] = f_optimized
     info(f"Optimized focal length: {f_optimized:.2f}")
 
-    return R, t, mask_pose
+    # --- 5. Recover Pose with optimized K ---
+    E_final = K_optimized.T @ F_clean @ K_optimized
+    
+    # Get inliers from the F_clean calculation
+    clean_pts1 = non_planar_pts1[f_mask.ravel().astype(bool)]
+    clean_pts2 = non_planar_pts2[f_mask.ravel().astype(bool)]
+
+    if len(clean_pts1) < 5:
+        warn("Too few F-inliers after cleaning. Aborting pose recovery.")
+        return None, None, K_optimized, non_planar_mask
+
+    # Use the same non-planar points and the new E to get the pose
+    _, R_est, t_est, mask_pose = cv2.recoverPose(E_final, clean_pts1, clean_pts2, K_optimized)
+    
+    info(f"Recovered pose with {np.sum(mask_pose)} inliers (from {len(clean_pts1)} non-planar pts)")
+    
+    return R_est, t_est, K_optimized, non_planar_mask
 
 
-import numpy as np
-from scipy.spatial.transform import Rotation as R
-import cv2
-
+# --- KEPT FROM YOUR ORIGINAL ---
 def rotation_angle_error_deg(R_pred, R_gt):
-    """Total angular difference in degrees between two rotation matrices."""
-    if R_pred is None or R_gt is None:
-        return None
+    if R_pred is None or R_gt is None: return None
     R_err = R_gt.T @ R_pred
-    rot = R.from_matrix(R_err)
+    rot = R_transform.from_matrix(R_err)
     return float(np.degrees(rot.magnitude()))
 
-def rotation_euler_error_deg(R_pred, R_gt, seq='xyz', degrees=True):
-    """Return per-axis Euler rotation error."""
-    if R_pred is None or R_gt is None:
-        return None
-    R_err = R_gt.T @ R_pred
-    return R.from_matrix(R_err).as_euler(seq, degrees=degrees)
-
+# --- KEPT FROM YOUR ORIGINAL ---
 def translation_direction_error_deg(t_pred, t_gt):
-    """Angle between translation directions (scale ambiguous) in degrees."""
-    if t_pred is None or t_gt is None:
-        return None
+    if t_pred is None or t_gt is None: return None
     tp = np.asarray(t_pred).ravel().astype(float)
     tg = np.asarray(t_gt).ravel().astype(float)
     if np.linalg.norm(tp) < 1e-9 or np.linalg.norm(tg) < 1e-9:
@@ -144,9 +177,9 @@ def translation_direction_error_deg(t_pred, t_gt):
     dot = np.clip(np.dot(tp, tg), -1.0, 1.0)
     return float(np.degrees(np.arccos(dot)))
 
+# --- KEPT FROM YOUR ORIGINAL ---
 def reprojection_rms(pts1, pts2, Rmat, tvec, K):
-    """Compute reprojection RMS error (in pixels)."""
-    if pts1 is None or pts2 is None or Rmat is None or tvec is None or K is None:
+    if pts1 is None or pts2 is None or Rmat is None or tvec is None or K is None or len(pts1) < 1:
         return None
     pts1 = np.asarray(pts1, dtype=float)
     pts2 = np.asarray(pts2, dtype=float)
@@ -159,16 +192,27 @@ def reprojection_rms(pts1, pts2, Rmat, tvec, K):
     diff = pts2 - proj2
     return float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
 
+# --- MODIFIED FROM YOUR ORIGINAL (Added translation magnitude error) ---
 def evaluate_pose_accuracy(R_pred, t_pred, R_gt, t_gt, pts1=None, pts2=None, K=None):
-    print("hERE")
     """Convenience wrapper that prints rotation, translation, and RMS errors."""
     r_err = rotation_angle_error_deg(R_pred, R_gt)
-    t_err = translation_direction_error_deg(t_pred, t_gt)
+    t_dir_err = translation_direction_error_deg(t_pred, t_gt)
+    
+    # Calculate magnitude error
+    t_mag_err = None
+    if t_pred is not None and t_gt is not None:
+        t_mag_pred = np.linalg.norm(t_pred)
+        t_mag_gt = np.linalg.norm(t_gt)
+        if t_mag_gt > 1e-6: # Avoid division by zero
+            t_mag_err = (np.abs(t_mag_pred - t_mag_gt) / t_mag_gt) * 100
+    
     rms = reprojection_rms(pts1, pts2, R_pred, t_pred, K) if pts1 is not None else None
+    
     print("---- Pose Accuracy ----")
     print(f"Rotation error: {r_err:.3f}°" if r_err is not None else "Rotation error: N/A")
-    print(f"Translation dir. error: {t_err:.3f}°" if t_err is not None else "Translation error: N/A")
+    print(f"Translation dir. error: {t_dir_err:.3f}°" if t_dir_err is not None else "Translation error: N/A")
+    print(f"Translation scale error: {t_mag_err:.2f}%" if t_mag_err is not None else "Translation scale error: N/A")
     if rms is not None:
         print(f"Reprojection RMS: {rms:.3f} px")
     print("------------------------")
-    return {"rot_err_deg": r_err, "trans_dir_err_deg": t_err, "rms_px": rms}
+    return {"rot_err_deg": r_err, "trans_dir_err_deg": t_dir_err, "trans_scale_err_pct": t_mag_err, "rms_px": rms}

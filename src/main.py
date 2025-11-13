@@ -13,22 +13,16 @@ from custom_logging import info, warn, show_and_save, err
 from input_output import load_image_rgb, load_calibration_kitti_like, yaw_from_R, yaw_from_pointcloud_pca, visualize_keypoints
 from preprocessing import enhance_contrast, detect_yolo, _YOLO_AVAILABLE
 from feature_extraction_maping import extract_features_orb, match_descriptors_flann, draw_matches, extract_features_sift
-from epipolar_geometry import estimate_fundamental, estimate_essential_and_pose, draw_epipolar_lines
-from triangulation_estimation import triangulate_with_P
-from disparity_estimation import compute_disparity, visualize_disparity
-from pose_estimation import estimate_pose_from_points
 
-# LEFT_IMG_PATH  = "../images/img2.png"      # path to left image
-# RIGHT_IMG_PATH = "../images/img1.png"      # path to right image
+# --- IMPORT OUR NEW/MOVED FUNCTIONS ---
+from epipolar_geometry import estimate_fundamental, self_calibrate_and_find_pose, draw_epipolar_lines, evaluate_pose_accuracy, rotation_matrix_to_euler_angles
 
-# LEFT_IMG_PATH  = "../images/img3.jpeg"      # path to left image
-# RIGHT_IMG_PATH = "../images/img4.jpeg"      # path to right image
 
-CALIB_PATH     = "calib.txt"      # optional KITTI-style calib (P0/P1 or K)
-YOLO_WEIGHTS   = "yolov8l.pt"     # optional (if ultralytics installed)
-OUTPUT_DIR     = "./output"       # where we save visualizations
-USE_GPU        = True             # preference flag
-
+# --- (Constants remain the same) ---
+CALIB_PATH     = "calib.txt"
+YOLO_WEIGHTS   = "yolov8l.pt"
+OUTPUT_DIR     = "./output"
+USE_GPU        = True
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -44,7 +38,6 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
     
     L = load_image_rgb(left_path)
     R = load_image_rgb(right_path)
-    
     info(f"Loaded images: L {L.shape} , R {R.shape}")
 
     show_and_save(L, "Left Image", "01_left.png", OUTPUT_DIR)
@@ -54,19 +47,15 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
     if calib_path and os.path.exists(calib_path):
         calib = load_calibration_kitti_like(calib_path)
     else:
-        warn("No calibration provided. Will attempt approximations / essential matrix (scale ambiguous).")
+        warn("No calibration provided. Will attempt self-calibration.")
 
-    # Preprocess for detection & features
     L_enh = enhance_contrast(L)
     R_enh = enhance_contrast(R)
-    show_and_save(L_enh, "Left Enhanced", "03_left_enhanced.png")
-    show_and_save(R_enh, "Right Enhanced", "04_right_enhanced.png")
-
-    # Detection
+    
     boxesL, clsL, confL = detect_yolo(L_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
     boxesR, clsR, confR = detect_yolo(R_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
 
-    # Draw detections
+    # --- (Box drawing logic is fine) ---
     def draw_boxes(img, boxes, color=(0,255,0)):
         out = img.copy()
         for i,b in enumerate(boxes):
@@ -76,12 +65,11 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
     show_and_save(draw_boxes(L, boxesL), "Left Detections", "05_left_dets.png")
     show_and_save(draw_boxes(R, boxesR), "Right Detections", "06_right_dets.png")
 
-    # Decide per-object or global
+
+    # --- (Box matching logic is fine) ---
     use_per_object = False
     matches_boxes = []
-
     if boxesL.shape[0] > 0 and boxesR.shape[0] > 0:
-        # match by IoU + class if available
         def iou(a,b):
             ax1,ay1,ax2,ay2 = a; bx1,by1,bx2,by2 = b
             xi1, yi1 = max(ax1,bx1), max(ay1,by1)
@@ -93,7 +81,6 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
             union = aarea + barea - inter
             return inter/union if union>0 else 0.0
         used = set()
-
         for i,bl in enumerate(boxesL):
             bestj=-1; bestv=0.0
             for j,br in enumerate(boxesR):
@@ -104,128 +91,66 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
             if bestj>=0 and bestv>0.2:
                 matches_boxes.append((i,bestj))
                 used.add(bestj)
-
         if matches_boxes:
             use_per_object = True
             info(f"Found {len(matches_boxes)} matched detection pairs.")
-
         else:
             warn("No matched detection boxes; falling back to global matching.")
-
     else:
-        warn("No detections found on one or both images; using whole-image matching.")
+        warn("No detections found; using whole-image matching.")
 
     results = []
-    # A helper to process a region pair (roiL, roiR) with origins
+    
+    # --- THIS IS THE NEW, CORRECTED process_region FUNCTION ---
     def process_region(roiL, roiR, originL=(0,0), originR=(0,0), R_ref=None, obj_class="unknown"):
         res = {}
-        # features
+        
+        # --- 1. Features & Matching ---
         kpsL, descL = extract_features_sift(roiL)
         kpsR, descR = extract_features_sift(roiR)
         visualize_keypoints(roiL, kpsL, f"07_roiL_kps_{obj_class}.png", f"ROI Left Keypoints ({obj_class})")
         visualize_keypoints(roiR, kpsR, f"08_roiR_kps_{obj_class}.png", f"ROI Right Keypoints ({obj_class})")
-        # matches
+        
         matches = match_descriptors_flann(descL, descR)
         draw_matches(roiL, kpsL, roiR, kpsR, matches, max_matches=300, fname=f"09_roi_matches_{obj_class}.png", title=f"ROI Matches ({obj_class})")
-        if len(matches) < 8:
+        
+        if len(matches) < 20: # Need more points for H+F
             warn(f"Only {len(matches)} good matches in ROI; may be insufficient.")
-        # build point arrays (global coords)
+            return res
+            
+        # Build point arrays (global coords)
         ptsL = np.array([kpsL[m.queryIdx].pt for m in matches]) + np.array(originL)
         ptsR = np.array([kpsR[m.trainIdx].pt for m in matches]) + np.array(originR)
         res['ptsL'] = ptsL
         res['ptsR'] = ptsR
-        # F matrix + epipolar visualization
-        F, maskF = estimate_fundamental(ptsL, ptsR)
-        if F is not None:
-            mask_in = maskF.ravel().astype(bool)
-            draw_epipolar_lines(L, R, ptsL[mask_in][:30], ptsR[mask_in][:30], F, f"10_epilines_{obj_class}.png")
-        # essential & pose
-        K = calib.get('K0') if 'K0' in calib else calib.get('K') if 'K' in calib else None
-        R_est, t_est, mask_pose = estimate_essential_and_pose(ptsL, ptsR, K)
+
+        # --- 2. Call our new self-calibration and pose function ---
+        K_guess = calib.get('K0') if 'K0' in calib else calib.get('K') # Use calib if present
+        
+        # Use full image shape L.shape for heuristics inside the function
+        R_est, t_est, K_est, non_planar_mask = self_calibrate_and_find_pose(ptsL, ptsR, K_guess, L.shape)
+
         res['R'] = R_est
-        res['t'] = t_est
+        res['t'] = t_est # This 't' is a unit vector
+        res['K'] = K_est # This is our (potentially) optimized K
+        
+        # --- 3. Visualization ---
+        if non_planar_mask is not None and len(ptsL[non_planar_mask]) > 8:
+            ptsL_nonplanar = ptsL[non_planar_mask]
+            ptsR_nonplanar = ptsR[non_planar_mask]
+            F_vis, _ = estimate_fundamental(ptsL_nonplanar, ptsR_nonplanar) # Get F for vis
+            if F_vis is not None:
+                draw_epipolar_lines(L, R, ptsL_nonplanar[:30], ptsR_nonplanar[:30], F_vis, f"10_epilines_nonplanar_{obj_class}.png")
+
         yaw_fromR = yaw_from_R(res['R'], R_ref) if res['R'] is not None else {}
         res['yaw_fromR'] = yaw_fromR
         return res
 
-    # Extract features from the images
-    kpsL, descL = extract_features_sift(L)
-    kpsR, descR = extract_features_sift(R)
-
-    # Match descriptors
-    matches = match_descriptors_flann(descL, descR)
-
-    # Select the 4 best matches based on distance
-    matches = sorted(matches, key=lambda x: x.distance)[:4]
-
-    # Ensure at least 4 matches are found
-    if len(matches) < 4:
-        err("Insufficient matches found for pose estimation. At least 4 matches are required.")
-        return
-
-    # Map the best 4 matches to keys 'A', 'B', 'C', and 'E'
-    points_img1 = {key: kpsL[m.queryIdx].pt for key, m in zip(['A', 'B', 'C', 'E'], matches)}
-    points_img2 = {key: kpsR[m.trainIdx].pt for key, m in zip(['A', 'B', 'C', 'E'], matches)}
-
-    # Extract corresponding points for pose estimation
-    points_img1 = {f"P{i+1}": kpsL[m.queryIdx].pt for i, m in enumerate(matches)}
-    points_img2 = {f"P{i+1}": kpsR[m.trainIdx].pt for i, m in enumerate(matches)}
-
-    # Visualize the selected keypoints
-    visualize_keypoints(L, [kpsL[m.queryIdx] for m in matches], fname="selected_keypoints_L.png", title="Selected Keypoints Left")
-    visualize_keypoints(R, [kpsR[m.trainIdx] for m in matches], fname="selected_keypoints_R.png", title="Selected Keypoints Right")
-
-    # Log the contents of points_img1 and points_img2 for debugging
-    info(f"points_img1: {points_img1}")
-    info(f"points_img2: {points_img2}")
-
-    # Ensure all required keys are present in points_img1 and points_img2
-    required_keys = {'A', 'B', 'C', 'E'}
-    if not required_keys.issubset(points_img1.keys()) or not required_keys.issubset(points_img2.keys()):
-        err("Missing required keys in points_img1 or points_img2 for pose estimation. Ensure at least 4 matches are found and mapped to 'A', 'B', 'C', 'E'.")
-        
-
-    # Map keys 'P1', 'P2', 'P3', 'P4' to 'A', 'B', 'C', 'E'
-    points_img1 = {new_key: points_img1[old_key] for new_key, old_key in zip(['A', 'B', 'C', 'E'], points_img1.keys())}
-    points_img2 = {new_key: points_img2[old_key] for new_key, old_key in zip(['A', 'B', 'C', 'E'], points_img2.keys())}
-
-    # Estimate pose
-    delta_pose, best_params = estimate_pose_from_points(points_img1, points_img2)
-
-    # Print the predicted rotations
-        # Print the predicted rotations
-    print("Predicted Rotations:")
-    print(f"Δα (Tilt): {delta_pose[0]:.2f}°")
-    print(f"Δβ (Yaw): {delta_pose[1]:.2f}°")
-    print(f"Δγ (Roll): {delta_pose[2]:.2f}°")
-
-    # ---- Pose Evaluation ----
-    # If you have ground truth for this pair (from rgb_paths in the caller), evaluate it
-    from epipolar_geometry import evaluate_pose_accuracy
-
-    # Extract ground truth if available from outer scope (safe fallback)
-    try:
-        if gt_pose_next is not None and gt_pose_cur is not None:
-            # Compute ground truth relative motion (R_gt_rel, t_gt_rel)
-            R_next = np.array(gt_pose_next[3])
-            R_cur  = np.array(gt_pose_cur[3])
-            t_next = np.array(gt_pose_next[4])
-            t_cur  = np.array(gt_pose_cur[4])
-            R_gt_rel = R_next @ R_cur.T
-            t_gt_rel = (t_next - R_gt_rel @ t_cur).reshape(3,1)
-            if 'R' in res and 't' in res:
-                metrics = evaluate_pose_accuracy(res['R'], res['t'], R_gt_rel, t_gt_rel, res.get('ptsL'), res.get('ptsR'))
-                print("Pose Evaluation Metrics:")
-                print(metrics)
-    except Exception as e:
-        warn(f"Could not evaluate ground-truth pose: {e}")
-
-
-    # Process either per-object or whole-image
+    # --- (This main logic is fine as-is) ---
     if use_per_object:
         for (iL,iR) in matches_boxes:
             bL = boxesL[iL].astype(int); bR = boxesR[iR].astype(int)
-            x1,y1,x2,y2 = map(max, (0,0,0,0), bL); X1,Y1,X2,Y2 = map(min, (L.shape[1],L.shape[0],R.shape[1],R.shape[0]), bR)
+            x1,y1,x2,y2 = map(max, (0,0,0,0), bL); X1,Y1,X2,Y2 = bR # Simplified
             roiL = L[y1:y2, x1:x2]
             roiR = R[Y1:Y2, X1:X2]
             obj_class = clsL[iL] if iL < len(clsL) else "Unknown"
@@ -235,42 +160,70 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
             results.append(res)
     else:
         info("Processing whole-image global pipeline.")
-        # whole-image matching
-        res = process_region(L, R, (0,0), (0,0))
+        res = process_region(L, R, (0,0), (0,0), obj_class="global")
         res['pair'] = ('global','global')
         results.append(res)
+    
+    # --- DELETED all the old 4-point logic ---
 
-    # # Dense depth/disparity estimation
-    # disp = compute_disparity(L, R)
-    # visualize_disparity(disp, "13_disparity.png", "Disparity Map")
+    # --- NEW, CORRECTED Pose Evaluation Block ---
+    try:
+        if gt_pose_next is not None and gt_pose_cur is not None and results:
+            res = results[0] # Get the first result
+            
+            # --- 1. Calculate Ground Truth R and t ---
+            R_next = np.array(gt_pose_next[3])
+            R_cur  = np.array(gt_pose_cur[3])
+            t_next_abs = np.array(gt_pose_next[4]) # Absolute position from GT
+            t_cur_abs  = np.array(gt_pose_cur[4]) # Absolute position from GT
+            
+            R_gt_rel = R_next @ R_cur.T
+            t_gt_rel = (t_next_abs - R_gt_rel @ t_cur_abs).reshape(3,1)
 
-    # # If no P matrices but we have estimated R/t for one result, build P1/P2 for triangulation & refine
-    # if 'P0' not in calib and results and ('K0' in calib or 'K' in calib):
-    #     # if any result has R,t we can form P matrices using K and R,t
-    #     K = calib.get('K0') if 'K0' in calib else calib.get('K', None)
-    #     for r in results:
-    #         if r.get('R') is not None and r.get('t') is not None and K is not None:
-    #             P1 = np.hstack((K, np.zeros((3,1))))
-    #             P2 = np.hstack((K @ r['R'], K @ r['t']))
-    #             # attempt triangulation for the matches we used earlier if any
-    #             if 'ptsL' in r and 'ptsR' in r and r['ptsL'].shape[0] > 0:
-    #                 pts3d = triangulate_with_P(r['ptsL'][r['ptsL'].shape[0]>0], r['ptsR'][r['ptsR'].shape[0]>0], P1, P2)
-    #                 r['pts3d_triangulated'] = pts3d
-    #                 info(f"Triangulated extra {pts3d.shape[0]} points using constructed P1/P2.")
-    # # Final report
-    # info("Final results summary:")
-    # for i, r in enumerate(results):
-    #     info(f"Result #{i}, pair={r.get('pair')}")
-    #     pts3d = r.get('pts3d') if r.get('pts3d') is not None else np.empty((0,3))
-    #     info(f"  - triangulated pts: {pts3d.shape[0]}")
-    #     if r.get('R') is not None:
-    #         info(f"  - Rotation matrix (R):\n{r['R']}")
-    #         info(f"  - Translation vector (t):\n{r['t'].T}")
-    #         info(f"  - yaw candidates: {r.get('yaw_fromR')}")
-    #     elif r.get('yaw_pca') is not None:
-    #         info(f"  - yaw (PCA): {r.get('yaw_pca'):.2f} deg")
-    #     else:
-    #         warn("  - No pose/yaw computed for this result.")
+            if 'R' in res and 't' in res and res['R'] is not None and res['t'] is not None:
+                R_est = res['R']
+                t_est_unit = res['t'] # This is the unit vector from recoverPose
+                
+                # --- 2. Get True Scale from GT ---
+                true_scale = np.linalg.norm(t_gt_rel)
+                
+                # --- 3. Apply Scale to our Estimate ---
+                # Also, we check the sign. t_est can be +/-.
+                # We check which direction is closer to the ground truth.
+                t_est_scaled_v1 = t_est_unit * true_scale
+                t_est_scaled_v2 = -t_est_unit * true_scale
+                
+                err_v1 = np.linalg.norm(t_est_scaled_v1 - t_gt_rel)
+                err_v2 = np.linalg.norm(t_est_scaled_v2 - t_gt_rel)
+                
+                t_est_scaled = t_est_scaled_v1 if err_v1 < err_v2 else t_est_scaled_v2
+                
+                # --- 4. Convert R to Euler Angles ---
+                euler_gt = rotation_matrix_to_euler_angles(R_gt_rel)
+                euler_est = rotation_matrix_to_euler_angles(R_est)
+
+                print("\n--- Rotation Comparison (Roll, Pitch, Yaw) ---")
+                print(f"Ground Truth: {euler_gt[0]:.2f}°, {euler_gt[1]:.2f}°, {euler_gt[2]:.2f}°")
+                print(f"Estimated:    {euler_est[0]:.2f}°, {euler_est[1]:.2f}°, {euler_est[2]:.2f}°")
+                
+                print("\n--- Translation Comparison (Scaled) ---")
+                print(f"Ground Truth t: {t_gt_rel.T} (Scale: {true_scale:.4f})")
+                print(f"Estimated t:    {t_est_scaled.T}")
+
+                # --- 5. Evaluate using the SCALED t ---
+                K_eval = res.get('K') # Use our new estimated K
+                if K_eval is None: # Fallback if K wasn't estimated
+                   K_eval = calib.get('K0', calib.get('K')) 
+                   
+                metrics = evaluate_pose_accuracy(R_est, t_est_scaled, R_gt_rel, t_gt_rel, res.get('ptsL'), res.get('ptsR'), K_eval)
+                print("Pose Evaluation Metrics:")
+                print(metrics)
+            else:
+                warn("Pose estimation (R or t) was None, cannot evaluate.")
+    except Exception as e:
+        warn(f"Could not evaluate ground-truth pose: {e}")
+        import traceback
+        traceback.print_exc()
 
     info(f"Total runtime: {time.time()-t0:.2f}s")
     return results

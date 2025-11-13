@@ -2,7 +2,6 @@ import os
 from main import run_pipeline
 from typing import Dict
 import numpy as np
-from spherical_lookup import estimate_rotation_spherical
 from epipolar_geometry import evaluate_pose_accuracy
 import cv2
 
@@ -103,29 +102,25 @@ for i in range(5):
         gt_pose_cur=gt_cur,
         gt_pose_next=gt_next
     )
-
-    # --- (2) Run Spherical Photometric Estimation ---
-    print("\n--- Spherical Photometric Estimation ---")
-    img_next = cv2.imread(rgb_paths[image_keys[i+1]]["image"])
-    img_cur = cv2.imread(rgb_paths[image_keys[i]]["image"])
-    R_est_sph, f_est_sph = estimate_rotation_spherical(img_cur, img_next, f_init=700)
     
-    # Convert spherical rotation matrix to Euler angles (°)
-    angles_sph = rotation_matrix_to_euler_angles(R_est_sph)
-    print(f"Estimated focal: {f_est_sph:.2f}")
-    print("Estimated rotation (matrix):\n", R_est_sph)
-    print(f"Estimated rotation (Euler, deg): roll={angles_sph[0]:.3f}, pitch={angles_sph[1]:.3f}, yaw={angles_sph[2]:.3f}")
-    
-    # Ground truth relative rotation
     R_gt_next = np.array(gt_next[3])
     R_gt_cur = np.array(gt_cur[3])
-    R_gt_rel = R_gt_next @ R_gt_cur.T
-    t_next = np.array(gt_next[4])
-    t_cur = np.array(gt_cur[4])
-    t_gt_rel = (t_next - R_gt_rel @ t_cur).reshape(3, 1)
     
-    # --- Pose error for spherical ---
-    print("\n---- Pose Accuracy (Spherical) ----")
-    metrics_sph = evaluate_pose_accuracy(R_est_sph, np.zeros((3,1)), R_gt_rel, t_gt_rel)
-    print("------------------------\n")
+    # FIX: Use indices [0:3] for translation, not [4]
+# FIX: Use indices [0:3] for translation, not [4]
+    t_next_vec = np.array([float(v) for v in gt_next[0:3]])
+    t_cur_vec  = np.array([float(v) for v in gt_cur[0:3]])
+
+    R_gt_rel = R_gt_next @ R_gt_cur.T
+    # Correct formula: t_rel = t_next - R_rel @ t_cur
+    t_gt_rel = (t_next_vec - R_gt_rel @ t_cur_vec).reshape(3, 1)
+
+    R_gt_rel = R_gt_next @ R_gt_cur.T
+    # Correct for
+    # ula: t_rel = t_next - R_rel @ t_cur
+    t_gt_rel = (t_next_vec - R_gt_rel @ t_cur_vec).reshape(3, 1)
+    # --- END OF FIX ---
+    
+
+    
 
