@@ -4,7 +4,7 @@ from typing import Dict
 import numpy as np
 from epipolar_geometry import evaluate_pose_accuracy
 import cv2
-
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 LEFT_IMG_PATH  = "../images/img2.png"      # path to left image
 RIGHT_IMG_PATH = "../images/img1.png"      # path to right image
 
@@ -12,7 +12,8 @@ RIGHT_IMG_PATH = "../images/img1.png"      # path to right image
 # RIGHT_IMG_PATH = "../images/img4.jpeg"      # path to right image
 
 CALIB_PATH     = "calib.txt"      # optional KITTI-style calib (P0/P1 or K)
-YOLO_WEIGHTS   = "yolov8l.pt"     # optional (if ultralytics installed)
+# YOLO_WEIGHTS   = "yolov8l.pt"     # optional (if ultralytics installed)
+YOLO_WEIGHTS   = "yolov8l-seg.pt"
 OUTPUT_DIR     = "./output"       # where we save visualizations
 USE_GPU        = True             # preference flag
 
@@ -86,7 +87,7 @@ rgb_paths = {k: v for k, v in rgb_paths.items() if v["pose"] is not None}
 
 image_keys = list(rgb_paths.keys())
 # ef run_pipeline(left_path=LEFT_IMG_PATH, right_path=RIGHT_IMG_PATH, calib_path=CALIB_PATH, yolo_weights=YOLO_WEIGHTS):
-for i in range(5):
+for i in range(3):
     gt_cur = rgb_paths[image_keys[i]]["pose"]
     gt_next = rgb_paths[image_keys[i+1]]["pose"]
 

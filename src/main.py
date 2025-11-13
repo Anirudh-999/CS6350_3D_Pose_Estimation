@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 from custom_logging import info, warn, show_and_save, err
 
 from input_output import load_image_rgb, load_calibration_kitti_like, yaw_from_R, yaw_from_pointcloud_pca, visualize_keypoints
-from preprocessing import enhance_contrast, detect_yolo, _YOLO_AVAILABLE
-from feature_extraction_maping import extract_features_orb, match_descriptors_flann, draw_matches, extract_features_sift
+from preprocessing import enhance_contrast, detect_yolo, _YOLO_AVAILABLE,segment_and_get_largest_box
+from feature_extraction_maping import extract_features_orb, match_descriptors_flann, draw_matches, extract_features_sift,match_features_loftr
 
 # --- IMPORT OUR NEW/MOVED FUNCTIONS ---
 from epipolar_geometry import estimate_fundamental, self_calibrate_and_find_pose, draw_epipolar_lines, evaluate_pose_accuracy, rotation_matrix_to_euler_angles
@@ -20,7 +20,8 @@ from epipolar_geometry import estimate_fundamental, self_calibrate_and_find_pose
 
 # --- (Constants remain the same) ---
 CALIB_PATH     = "calib.txt"
-YOLO_WEIGHTS   = "yolov8l.pt"
+# YOLO_WEIGHTS   = "yolov8l.pt"
+YOLO_WEIGHTS   = "yolov8l-seg.pt"
 OUTPUT_DIR     = "./output"
 USE_GPU        = True
 
@@ -52,8 +53,10 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
     L_enh = enhance_contrast(L)
     R_enh = enhance_contrast(R)
     
-    boxesL, clsL, confL = detect_yolo(L_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
-    boxesR, clsR, confR = detect_yolo(R_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
+    # boxesL, clsL, confL = detect_yolo(L_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
+    # boxesR, clsR, confR = detect_yolo(R_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
+    boxesL, clsL, confL, masked_L = segment_and_get_largest_box(L_enh, yolo_weights, save_mask_path=os.path.join(OUTPUT_DIR, "05_left_seg_mask.png")) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]), None)
+    boxesR, clsR, confR, masked_R = segment_and_get_largest_box(R_enh, yolo_weights, save_mask_path=os.path.join(OUTPUT_DIR, "06_right_seg_mask.png")) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]), None)
 
     # --- (Box drawing logic is fine) ---
     def draw_boxes(img, boxes, color=(0,255,0)):
@@ -62,8 +65,8 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
             x1,y1,x2,y2 = map(int, b)
             cv2.rectangle(out, (x1,y1), (x2,y2), color, 2)
         return out
-    show_and_save(draw_boxes(L, boxesL), "Left Detections", "05_left_dets.png")
-    show_and_save(draw_boxes(R, boxesR), "Right Detections", "06_right_dets.png")
+    show_and_save(draw_boxes(masked_L, boxesL), "Left Detections", "05_left_dets.png")
+    show_and_save(draw_boxes(masked_R, boxesR), "Right Detections", "06_right_dets.png")
 
 
     # --- (Box matching logic is fine) ---
@@ -100,9 +103,10 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
         warn("No detections found; using whole-image matching.")
 
     results = []
-    
+    print("use per object ",use_per_object)
     # --- THIS IS THE NEW, CORRECTED process_region FUNCTION ---
     def process_region(roiL, roiR, originL=(0,0), originR=(0,0), R_ref=None, obj_class="unknown"):
+        print("processing region")
         res = {}
         
         # --- 1. Features & Matching ---
@@ -111,9 +115,9 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
         visualize_keypoints(roiL, kpsL, f"07_roiL_kps_{obj_class}.png", f"ROI Left Keypoints ({obj_class})")
         visualize_keypoints(roiR, kpsR, f"08_roiR_kps_{obj_class}.png", f"ROI Right Keypoints ({obj_class})")
         
-        matches = match_descriptors_flann(descL, descR)
+        kpsL, kpsR,matches = match_features_loftr(roiL, roiR)
         draw_matches(roiL, kpsL, roiR, kpsR, matches, max_matches=300, fname=f"09_roi_matches_{obj_class}.png", title=f"ROI Matches ({obj_class})")
-        
+        print("len matches ",len(matches))
         if len(matches) < 20: # Need more points for H+F
             warn(f"Only {len(matches)} good matches in ROI; may be insufficient.")
             return res
@@ -126,6 +130,7 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
 
         # --- 2. Call our new self-calibration and pose function ---
         K_guess = calib.get('K0') if 'K0' in calib else calib.get('K') # Use calib if present
+        print("k_guess ",K_guess)
         
         # Use full image shape L.shape for heuristics inside the function
         R_est, t_est, K_est, non_planar_mask = self_calibrate_and_find_pose(ptsL, ptsR, K_guess, L.shape)
@@ -151,8 +156,8 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
         for (iL,iR) in matches_boxes:
             bL = boxesL[iL].astype(int); bR = boxesR[iR].astype(int)
             x1,y1,x2,y2 = map(max, (0,0,0,0), bL); X1,Y1,X2,Y2 = bR # Simplified
-            roiL = L[y1:y2, x1:x2]
-            roiR = R[Y1:Y2, X1:X2]
+            roiL = masked_L[y1:y2, x1:x2]
+            roiR = masked_R[Y1:Y2, X1:X2]
             obj_class = clsL[iL] if iL < len(clsL) else "Unknown"
             info(f"Processing object ROI L#{iL} (class: {obj_class}) size {roiL.shape} / R#{iR} size {roiR.shape}")
             res = process_region(roiL, roiR, (x1,y1), (X1,Y1), obj_class=obj_class)
@@ -160,15 +165,14 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
             results.append(res)
     else:
         info("Processing whole-image global pipeline.")
-        res = process_region(L, R, (0,0), (0,0), obj_class="global")
+        res = process_region(masked_L, masked_R, (0,0), (0,0), obj_class="global")
         res['pair'] = ('global','global')
         results.append(res)
     
-    # --- DELETED all the old 4-point logic ---
 
-    # --- NEW, CORRECTED Pose Evaluation Block ---
     try:
         if gt_pose_next is not None and gt_pose_cur is not None and results:
+            
             res = results[0] # Get the first result
             
             # --- 1. Calculate Ground Truth R and t ---
@@ -179,8 +183,9 @@ def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_
             
             R_gt_rel = R_next @ R_cur.T
             t_gt_rel = (t_next_abs - R_gt_rel @ t_cur_abs).reshape(3,1)
-
+            print(res)
             if 'R' in res and 't' in res and res['R'] is not None and res['t'] is not None:
+                print("get pose")
                 R_est = res['R']
                 t_est_unit = res['t'] # This is the unit vector from recoverPose
                 

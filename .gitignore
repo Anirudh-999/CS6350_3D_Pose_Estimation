@@ -6,3 +6,6 @@ venv/
 calib.txt
 TPA_12.pdf
 download.pdf
+dataset
+Dataset_coke
+rgbd_dataset_freiburg3_cabinet.tgz
