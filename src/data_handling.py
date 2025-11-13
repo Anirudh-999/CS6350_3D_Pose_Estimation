@@ -120,7 +120,6 @@ for i in range(3):
     # Correct for
     # ula: t_rel = t_next - R_rel @ t_cur
     t_gt_rel = (t_next_vec - R_gt_rel @ t_cur_vec).reshape(3, 1)
-    # --- END OF FIX ---
     
 
     
