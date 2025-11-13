@@ -2,7 +2,7 @@ from matplotlib import pyplot as plt
 import os
 import logging
 import cv2
-LOGGING_ENABLED = False
+LOGGING_ENABLED = True
 # LEFT_IMG_PATH  = "images/img2.png"      # path to left image
 # RIGHT_IMG_PATH = "images/img1.png"      # path to right image
 
