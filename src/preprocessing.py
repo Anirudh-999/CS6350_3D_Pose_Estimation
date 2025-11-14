@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from custom_logging import info, warn, err, show_and_save
+
 # Import both YOLO (for detect_yolo) and FastSAM (for segment_and_get_largest_box)
 from ultralytics import YOLO, FastSAM
 
@@ -8,11 +9,17 @@ _YOLO_AVAILABLE = False
 try:
     from ultralytics import YOLO, FastSAM
     _YOLO_AVAILABLE = True
+    _FASTSAM_AVAILABLE = True
 except Exception:
     YOLO = None
     FastSAM = None
 
 def enhance_contrast(img_rgb: np.ndarray) -> np.ndarray:
+    """
+    Enhance image contrast using CLAHE in YUV or LAB color space.
+
+    returns enhanced RGB image.
+    """
     
     try:
         yuv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2YUV)
@@ -27,9 +34,8 @@ def enhance_contrast(img_rgb: np.ndarray) -> np.ndarray:
 
         return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
-# In your preprocessing.py file
-
 def segment_and_get_largest_box(img_rgb, model_path="yolov8l-seg.pt", save_mask_path=None):
+
     """
     Runs FastSAM segmentation on an image, finds the 2nd largest segment mask,
     and returns its tight bounding box AND the masked image.
@@ -37,6 +43,7 @@ def segment_and_get_largest_box(img_rgb, model_path="yolov8l-seg.pt", save_mask_
     
     Returns: (boxes, cls_ids, confs, masked_image)
     """
+    
     if not _YOLO_AVAILABLE or FastSAM is None:
         warn("FastSAM (ultralytics) not installed, skipping segmentation.")
         # --- MODIFIED: Return 4 values ---
@@ -61,7 +68,7 @@ def segment_and_get_largest_box(img_rgb, model_path="yolov8l-seg.pt", save_mask_
         largest_area = 0
         largest_index = -1
         second_largest_area = 0
-        second_largest_index = -1
+        second_largest_index = -2
         
         for i, mask_data in enumerate(result.masks):
             polygon_points = mask_data.xy[0]
@@ -90,68 +97,69 @@ def segment_and_get_largest_box(img_rgb, model_path="yolov8l-seg.pt", save_mask_
 
         mask_data = result.masks[second_largest_index]
 
-        # 4a. Get the raw pixel mask
+        # Get the raw pixel mask
         low_res_mask = mask_data.data[0].cpu().numpy()
         
-        # 4b. Resize the mask to the original image's size
+        # Resize the mask to the original image's size
         orig_h, orig_w = img_rgb.shape[:2]
         full_res_mask = cv2.resize(low_res_mask, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
 
-        # 4c. Threshold to get a binary mask
+        # Threshold to get a binary mask
         _, binary_mask = cv2.threshold(full_res_mask, 0.5, 255, cv2.THRESH_BINARY)
         binary_mask_uint8 = binary_mask.astype(np.uint8)
 
-        # --- MODIFIED: Create masked image UNCONDITIONALLY ---
+        # MODIFIED: Create masked image 
         # Create the masked image: object on black background
         masked_image = cv2.bitwise_and(img_rgb, img_rgb, mask=binary_mask_uint8)
 
-        # 4d. Find contours from this precise binary mask
+        # Find contours from this precise binary mask
         contours, _ = cv2.findContours(binary_mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
             warn("Could not find contours in the resized mask.")
-            # --- MODIFIED: Return 4 values ---
+            # MODIFIED: Return 4 values
             return np.empty((0, 4)), [None], [0.0], None
 
-        # 4e. Find the single largest contour
+        # Find the single largest contour
         main_contour = max(contours, key=cv2.contourArea)
 
-        # 4f. Calculate the TIGHT bounding box from the contour
+        # Calculate the TIGHT bounding box from the contour
         x, y, w, h = cv2.boundingRect(main_contour)
         
-        # --- MODIFIED: Save the mask visualization ---
+        # Save the mask visualization
         if save_mask_path:
             try:
                 # Use the 'masked_image' we already created
                 show_and_save(masked_image, title=f"Used Segment Mask (FastSAM)", fname=save_mask_path[10:], output_dir=save_mask_path)
             except Exception as e:
                 warn(f"Could not save segmentation mask: {e}")
-        # --- END MODIFIED ---
         
         # Format as [x1, y1, x2, y2]
         box = np.array([[x, y, x + w, y + h]])
         
-        # --- MODIFIED: Return the masked_image as the 4th value ---
+        # Return the masked_image as the 4th value
         return box, [None], [1.0], masked_image
-        # --- END MODIFIED ---
 
     except Exception as e:
         err(f"FastSAM segmentation failed: {e}")
         import traceback
         traceback.print_exc()
-        # --- MODIFIED: Return 4 values ---
         return np.empty((0, 4)), [None], [0.0], None
 
 def detect_yolo(img_rgb: np.ndarray, weights_path = "yolov8l", conf=0.1, imgsz=608):
+
     """
-    This function is unchanged and still uses YOLO.
+    Runs YOLO object detection on an image.
+
+    Returns: boxes (Nx4), class_ids (N,), confidences (N,)
     """
+
     if not _YOLO_AVAILABLE:
         warn("ultralytics YOLO not installed. Skipping detection.")
         return np.empty((0,4)), np.array([]), np.array([])
 
     try:
-        model = YOLO(weights_path)
+        model = YOLO(weights_path)  
         res = model(img_rgb, imgsz=imgsz, conf=conf)[0]
         if getattr(res,'boxes',None) is None:
             return np.empty((0,4)), np.array([]), np.array([])
@@ -168,7 +176,10 @@ def detect_yolo(img_rgb: np.ndarray, weights_path = "yolov8l", conf=0.1, imgsz=6
 def refine_matches_photometric(img1, img2, pts1):
     """
     Refine matches using Lucas-Kanade optical flow for subpixel accuracy.
+
+    return pts1_refined, pts2_refined
     """
+
     gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
     gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
 

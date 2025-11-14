@@ -17,6 +17,8 @@ def estimate_focal_length(pts1, pts2, w=640, h=480):
     """
     Estimates focal length by optimizing the Essential Matrix singular values.
     This logic is borrowed from your epipolar_geometry.py
+
+    returns K (3x3) with estimated focal length.
     """
     if pts1.shape[0] < 8:
         warn("Need at least 8 points for focal length estimation.")
@@ -56,10 +58,14 @@ def estimate_focal_length(pts1, pts2, w=640, h=480):
     return K_est
 
 def create_point_cloud(depth_map, K, step=5):
+    
     """
     Unprojects a depth map into a 3D point cloud given intrinsics K.
     Downsamples by 'step' for efficiency.
+
+    returns Nx3 array of 3D points.
     """
+
     if depth_map is None or K is None:
         return None
         
@@ -90,6 +96,8 @@ def normalize_point_cloud(pts3d):
     """
     Aligns point cloud to origin and scales to unit norm.
     This helps correct for the unknown/inconsistent scale from MiDaS.
+
+    returns normalized Nx3 point cloud.
     """
     if pts3d is None or pts3d.shape[0] == 0:
         return None
@@ -109,7 +117,9 @@ def normalize_point_cloud(pts3d):
 
 def estimate_pose_with_midas_icp(L_rgb, R_rgb):
     """
-    Main function to estimate pose (R, t) using MiDaS and ICP.
+    function to estimate pose (R, t) using MiDaS and ICP.
+
+    returns R (3x3), t (3x1) estimated between L and R images.
     """
     if not _MIDAS_AVAILABLE or not _O3D_AVAILABLE:
         warn("MiDaS or Open3D not available. Skipping ICP pipeline.")
@@ -176,39 +186,3 @@ def estimate_pose_with_midas_icp(L_rgb, R_rgb):
     t_est = T_matrix[:3, 3] # Note: This 't' is relative to the normalized clouds
     
     return R_est, t_est
-
-# --- Main execution block to run this file directly ---
-if __name__ == "__main__":
-    
-    # --- Define Image Paths (Update these as needed) ---
-    # Using the paths from data_handling.py as a default
-    try:
-        from data_handling import LEFT_IMG_PATH, RIGHT_IMG_PATH
-        info(f"Using image paths from data_handling.py")
-    except Exception:
-        warn("data_handling.py not found. Using hardcoded paths.")
-        # Fallback paths
-        LEFT_IMG_PATH  = "../images/img3.jpeg"
-        RIGHT_IMG_PATH = "../images/img4.jpeg"
-
-    if not os.path.exists(LEFT_IMG_PATH) or not os.path.exists(RIGHT_IMG_PATH):
-        err(f"Images not found at: {LEFT_IMG_PATH} or {RIGHT_IMG_PATH}")
-        sys.exit(1)
-
-    info("Loading images...")
-    L_rgb = load_image_rgb(LEFT_IMG_PATH)
-    R_rgb = load_image_rgb(RIGHT_IMG_PATH)
-    
-    t0 = time.time()
-    info("Starting MiDaS + ICP Pose Estimation Pipeline...")
-    
-    R, t = estimate_pose_with_midas_icp(L_rgb, R_rgb)
-    
-    if R is not None:
-        info("--- MiDaS + ICP Pipeline Succeeded ---")
-        info(f"Estimated Rotation (R):\n{R}")
-        info(f"Estimated (Normalized) Translation (t):\n{t.T}")
-    else:
-        err("--- MiDaS + ICP Pipeline Failed ---")
-        
-    info(f"Total runtime: {time.time() - t0:.2f}s")

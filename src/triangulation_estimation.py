@@ -14,6 +14,7 @@ def triangulate_with_P(pts1, pts2, P1, P2):
     """
     pts1, pts2: Nx2 float arrays. P1, P2: 3x4 projection matrices.
     Returns Nx3 points.
+
     """
     if pts1.shape[0] == 0:
         return np.empty((0,3))
@@ -24,6 +25,13 @@ def triangulate_with_P(pts1, pts2, P1, P2):
     return pts3
 
 def icp_refine(observed_pts, model_pts, init=np.eye(4)):
+    """
+    Refine alignment between observed_pts and model_pts using ICP.
+    observed_pts: Nx3 array of points from observation.
+    model_pts: Mx3 array of model points.
+    init: initial 4x4 transformation matrix.
+    
+    returns refined 4x4 transformation matrix."""
     if not _O3D_AVAILABLE:
         warn("Open3D not available; skipping ICP.")
         return init
@@ -45,6 +53,8 @@ def icp_refine(observed_pts, model_pts, init=np.eye(4)):
 def bundle_adjustment(pts1, pts2, K, R, t):
     """
     Refine R, t by minimizing geometric reprojection error.
+
+    returns refined R, t.
     """
     def reprojection_error(params, pts1, pts2, K):
         R_vec = params[:3]

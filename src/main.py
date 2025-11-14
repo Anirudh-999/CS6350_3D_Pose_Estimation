@@ -1,234 +1,426 @@
+# main.py
 import os
-import sys
-import math
 import time
-import warnings
-from typing import Optional, Tuple, Dict, Any, List
-from ultralytics import YOLO
 import numpy as np
 import cv2
-import matplotlib.pyplot as plt
-from custom_logging import info, warn, show_and_save, err
 
-from input_output import load_image_rgb, load_calibration_kitti_like, yaw_from_R, yaw_from_pointcloud_pca, visualize_keypoints
-from preprocessing import enhance_contrast, detect_yolo, _YOLO_AVAILABLE,segment_and_get_largest_box
-from feature_extraction_maping import extract_features_orb, match_descriptors_flann, draw_matches, extract_features_sift,match_features_loftr
+from custom_logging import LOGGING_ENABLED, info, warn, err, show_and_save
 
-# --- IMPORT OUR NEW/MOVED FUNCTIONS ---
-from epipolar_geometry import estimate_fundamental, self_calibrate_and_find_pose, draw_epipolar_lines, evaluate_pose_accuracy, rotation_matrix_to_euler_angles
+# Project helpers (you already have these in your repo)
+from input_output import load_image_rgb, load_calibration_kitti_like, yaw_from_R, visualize_keypoints
+from preprocessing import enhance_contrast, segment_and_get_largest_box
+from feature_extraction_maping import (
+    match_features_loftr,
+    loftr_on_edges,
+    extract_features_sift,
+    match_descriptors_flann,
+    sift_on_edges,
+    draw_matches,
+)
+from epipolar_geometry import (
+    evaluate_pose_accuracy,
+    rotation_matrix_to_euler_angles,
+)
 
-
-# --- (Constants remain the same) ---
-CALIB_PATH     = "calib.txt"
-# YOLO_WEIGHTS   = "yolov8l.pt"
-YOLO_WEIGHTS   = "yolov8l-seg.pt"
-OUTPUT_DIR     = "./output"
-USE_GPU        = True
-
+OUTPUT_DIR = "./output"
+YOLO_WEIGHTS = "yolov8l-seg.pt"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def run_pipeline(left_path = None, right_path=None, calib_path=CALIB_PATH, yolo_weights=YOLO_WEIGHTS, gt_pose_cur = None, gt_pose_next = None):
+def centroid_from_mask(mask_img):
+    """Compute centroid of non-zero pixels in mask (RGB or single channel)."""
+    if mask_img is None:
+        return None
+    gray = cv2.cvtColor(mask_img, cv2.COLOR_RGB2GRAY) if mask_img.ndim == 3 else mask_img
+    ys, xs = np.nonzero(gray)
+    if len(xs) == 0:
+        return None
+    return np.array([xs.mean(), ys.mean()])
+
+
+def pick_best_homography_candidate(Rs, Ts, normals, ptsL, ptsR, K):
+    """
+    Heuristic to pick the best homography decomposition candidate.
+    Prefers rotations with det ~ +1 and normals with larger absolute z,
+    then slightly prefers larger translation magnitude.
+    """
+    best_idx = None
+    best_score = 1e9
+    for i, R in enumerate(Rs):
+        try:
+            detR = float(np.linalg.det(R))
+        except Exception:
+            detR = -1.0
+        if detR < 0.0:
+            # discard flipped parity where possible
+            continue
+        n = normals[i] if i < len(normals) else np.array([0.0, 0.0, 0.0])
+        nz = float(n[2]) if n is not None else 0.0
+        t = Ts[i] if i < len(Ts) else np.zeros(3)
+        tnorm = float(np.linalg.norm(t))
+        # score: prefer large |nz|, prefer larger tnorm modestly
+        score = -abs(nz) - 0.01 * tnorm
+        if score < best_score:
+            best_score = score
+            best_idx = i
+    if best_idx is None and len(Rs) > 0:
+        best_idx = 0
+    return best_idx
+
+
+def safe_show_and_save(img_rgb, title, fname):
+    """Wrapper: only call show_and_save if provided and fname is str."""
+    try:
+        if fname is None:
+            return
+        show_and_save(img_rgb, title, fname)
+    except Exception:
+        # Don't crash the pipeline on visualization failures
+        if LOGGING_ENABLED:
+            warn(f"Could not save {fname}")
+
+
+def run_pipeline(left_path, right_path, calib_path=None, yolo_weights=YOLO_WEIGHTS,
+                 gt_pose_cur=None, gt_pose_next=None, save_vis=True):
+    """
+    Main pipeline:
+      - load images
+      - segmentation -> ROI
+      - matching chain (LoFTR-on-edges -> LoFTR -> SIFT-on-edges -> SIFT)
+      - homography (RANSAC) + decompose
+      - choose best R,t
+      - evaluate vs GT if provided
+
+    Returns:
+      results_list, metrics_dict, per_frame_metrics_dict
+
+    per_frame_metrics_dict contains:
+      { 'roll_err', 'pitch_err', 'yaw_err',
+        'rot_err_deg', 'trans_dir_err_deg', 'trans_scale_err_pct', 'rms_px' }
+    """
     t0 = time.time()
-    
-    if os.path.exists(left_path) and os.path.exists(right_path):
-        info(f"Running pipeline on images:\n L: {left_path}\n R: {right_path}")
-    else:
-        err("Left or Right image path does not exist.")
-        return
-    
+    if not (os.path.exists(left_path) and os.path.exists(right_path)):
+        if LOGGING_ENABLED:
+            err("Left or Right image path does not exist.")
+        return None, None, None
+
     L = load_image_rgb(left_path)
     R = load_image_rgb(right_path)
-    info(f"Loaded images: L {L.shape} , R {R.shape}")
+    if LOGGING_ENABLED:
+        info(f"Loaded images: L {L.shape}, R {R.shape}")
 
-    show_and_save(L, "Left Image", "01_left.png", OUTPUT_DIR)
-    show_and_save(R, "Right Image", "02_right.png", OUTPUT_DIR)
+    # quick saves
+    if save_vis:
+        safe_show_and_save(L, "Left Image", os.path.join(OUTPUT_DIR, "01_left.png"))
+        safe_show_and_save(R, "Right Image", os.path.join(OUTPUT_DIR, "02_right.png"))
 
-    calib = {}
+    # calibration guess
+    Kmat = None
     if calib_path and os.path.exists(calib_path):
-        calib = load_calibration_kitti_like(calib_path)
-    else:
-        warn("No calibration provided. Will attempt self-calibration.")
+        try:
+            calib = load_calibration_kitti_like(calib_path)
+            Kmat = calib.get("K0") or calib.get("K")
+            if LOGGING_ENABLED:
+                info("Using provided calibration.")
+        except Exception:
+            Kmat = None
 
+    if Kmat is None:
+        h, w = L.shape[:2]
+        f_guess = float(max(w, h))
+        cx, cy = w / 2.0, h / 2.0
+        Kmat = np.array([[f_guess, 0, cx], [0, f_guess, cy], [0, 0, 1]], dtype=float)
+        if LOGGING_ENABLED:
+            warn("No calibration provided. Will use heuristic focal ~ width.")
+
+    # preprocessing
     L_enh = enhance_contrast(L)
     R_enh = enhance_contrast(R)
-    
-    # boxesL, clsL, confL = detect_yolo(L_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
-    # boxesR, clsR, confR = detect_yolo(R_enh, yolo_weights) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]))
-    boxesL, clsL, confL, masked_L = segment_and_get_largest_box(L_enh, yolo_weights, save_mask_path=os.path.join(OUTPUT_DIR, "05_left_seg_mask.png")) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]), None)
-    boxesR, clsR, confR, masked_R = segment_and_get_largest_box(R_enh, yolo_weights, save_mask_path=os.path.join(OUTPUT_DIR, "06_right_seg_mask.png")) if _YOLO_AVAILABLE and yolo_weights and os.path.exists(yolo_weights) else (np.empty((0,4)), np.array([]), np.array([]), None)
 
-    # --- (Box drawing logic is fine) ---
-    def draw_boxes(img, boxes, color=(0,255,0)):
-        out = img.copy()
-        for i,b in enumerate(boxes):
-            x1,y1,x2,y2 = map(int, b)
-            cv2.rectangle(out, (x1,y1), (x2,y2), color, 2)
-        return out
-    show_and_save(draw_boxes(masked_L, boxesL), "Left Detections", "05_left_dets.png")
-    show_and_save(draw_boxes(masked_R, boxesR), "Right Detections", "06_right_dets.png")
-
-
-    # --- (Box matching logic is fine) ---
-    use_per_object = False
-    matches_boxes = []
-    if boxesL.shape[0] > 0 and boxesR.shape[0] > 0:
-        def iou(a,b):
-            ax1,ay1,ax2,ay2 = a; bx1,by1,bx2,by2 = b
-            xi1, yi1 = max(ax1,bx1), max(ay1,by1)
-            xi2, yi2 = min(ax2,bx2), min(ay2,by2)
-            iw, ih = max(0, xi2 - xi1), max(0, yi2 - yi1)
-            inter = iw*ih
-            aarea = max(0, ax2-ax1)*max(0, ay2-ay1)
-            barea = max(0, bx2-bx1)*max(0, by2-by1)
-            union = aarea + barea - inter
-            return inter/union if union>0 else 0.0
-        used = set()
-        for i,bl in enumerate(boxesL):
-            bestj=-1; bestv=0.0
-            for j,br in enumerate(boxesR):
-                if j in used: continue
-                v = iou(bl,br)
-                if v>bestv:
-                    bestv=v; bestj=j
-            if bestj>=0 and bestv>0.2:
-                matches_boxes.append((i,bestj))
-                used.add(bestj)
-        if matches_boxes:
-            use_per_object = True
-            info(f"Found {len(matches_boxes)} matched detection pairs.")
-        else:
-            warn("No matched detection boxes; falling back to global matching.")
-    else:
-        warn("No detections found; using whole-image matching.")
-
-    results = []
-    print("use per object ",use_per_object)
-    # --- THIS IS THE NEW, CORRECTED process_region FUNCTION ---
-    def process_region(roiL, roiR, originL=(0,0), originR=(0,0), R_ref=None, obj_class="unknown"):
-        print("processing region")
-        res = {}
-        
-        # --- 1. Features & Matching ---
-        kpsL, descL = extract_features_sift(roiL)
-        kpsR, descR = extract_features_sift(roiR)
-        visualize_keypoints(roiL, kpsL, f"07_roiL_kps_{obj_class}.png", f"ROI Left Keypoints ({obj_class})")
-        visualize_keypoints(roiR, kpsR, f"08_roiR_kps_{obj_class}.png", f"ROI Right Keypoints ({obj_class})")
-        
-        kpsL, kpsR,matches = match_features_loftr(roiL, roiR)
-        draw_matches(roiL, kpsL, roiR, kpsR, matches, max_matches=300, fname=f"09_roi_matches_{obj_class}.png", title=f"ROI Matches ({obj_class})")
-        print("len matches ",len(matches))
-        if len(matches) < 20: # Need more points for H+F
-            warn(f"Only {len(matches)} good matches in ROI; may be insufficient.")
-            return res
-            
-        # Build point arrays (global coords)
-        ptsL = np.array([kpsL[m.queryIdx].pt for m in matches]) + np.array(originL)
-        ptsR = np.array([kpsR[m.trainIdx].pt for m in matches]) + np.array(originR)
-        res['ptsL'] = ptsL
-        res['ptsR'] = ptsR
-
-        # --- 2. Call our new self-calibration and pose function ---
-        K_guess = calib.get('K0') if 'K0' in calib else calib.get('K') # Use calib if present
-        print("k_guess ",K_guess)
-        
-        # Use full image shape L.shape for heuristics inside the function
-        R_est, t_est, K_est, non_planar_mask = self_calibrate_and_find_pose(ptsL, ptsR, K_guess, L.shape)
-
-        res['R'] = R_est
-        res['t'] = t_est # This 't' is a unit vector
-        res['K'] = K_est # This is our (potentially) optimized K
-        
-        # --- 3. Visualization ---
-        if non_planar_mask is not None and len(ptsL[non_planar_mask]) > 8:
-            ptsL_nonplanar = ptsL[non_planar_mask]
-            ptsR_nonplanar = ptsR[non_planar_mask]
-            F_vis, _ = estimate_fundamental(ptsL_nonplanar, ptsR_nonplanar) # Get F for vis
-            if F_vis is not None:
-                draw_epipolar_lines(L, R, ptsL_nonplanar[:30], ptsR_nonplanar[:30], F_vis, f"10_epilines_nonplanar_{obj_class}.png")
-
-        yaw_fromR = yaw_from_R(res['R'], R_ref) if res['R'] is not None else {}
-        res['yaw_fromR'] = yaw_fromR
-        return res
-
-    # --- (This main logic is fine as-is) ---
-    if use_per_object:
-        for (iL,iR) in matches_boxes:
-            bL = boxesL[iL].astype(int); bR = boxesR[iR].astype(int)
-            x1,y1,x2,y2 = map(max, (0,0,0,0), bL); X1,Y1,X2,Y2 = bR # Simplified
-            roiL = masked_L[y1:y2, x1:x2]
-            roiR = masked_R[Y1:Y2, X1:X2]
-            obj_class = clsL[iL] if iL < len(clsL) else "Unknown"
-            info(f"Processing object ROI L#{iL} (class: {obj_class}) size {roiL.shape} / R#{iR} size {roiR.shape}")
-            res = process_region(roiL, roiR, (x1,y1), (X1,Y1), obj_class=obj_class)
-            res['pair'] = (iL,iR)
-            results.append(res)
-    else:
-        info("Processing whole-image global pipeline.")
-        res = process_region(masked_L, masked_R, (0,0), (0,0), obj_class="global")
-        res['pair'] = ('global','global')
-        results.append(res)
-    
-
+    # segmentation (primary)
     try:
-        if gt_pose_next is not None and gt_pose_cur is not None and results:
-            
-            res = results[0] # Get the first result
-            
-            # --- 1. Calculate Ground Truth R and t ---
-            R_next = np.array(gt_pose_next[3])
-            R_cur  = np.array(gt_pose_cur[3])
-            t_next_abs = np.array(gt_pose_next[4]) # Absolute position from GT
-            t_cur_abs  = np.array(gt_pose_cur[4]) # Absolute position from GT
-            
-            R_gt_rel = R_next @ R_cur.T
-            t_gt_rel = (t_next_abs - R_gt_rel @ t_cur_abs).reshape(3,1)
-            print(res)
-            if 'R' in res and 't' in res and res['R'] is not None and res['t'] is not None:
-                print("get pose")
-                R_est = res['R']
-                t_est_unit = res['t'] # This is the unit vector from recoverPose
-                
-                # --- 2. Get True Scale from GT ---
-                true_scale = np.linalg.norm(t_gt_rel)
-                
-                # --- 3. Apply Scale to our Estimate ---
-                # Also, we check the sign. t_est can be +/-.
-                # We check which direction is closer to the ground truth.
-                t_est_scaled_v1 = t_est_unit * true_scale
-                t_est_scaled_v2 = -t_est_unit * true_scale
-                
-                err_v1 = np.linalg.norm(t_est_scaled_v1 - t_gt_rel)
-                err_v2 = np.linalg.norm(t_est_scaled_v2 - t_gt_rel)
-                
-                t_est_scaled = t_est_scaled_v1 if err_v1 < err_v2 else t_est_scaled_v2
-                
-                # --- 4. Convert R to Euler Angles ---
-                euler_gt = rotation_matrix_to_euler_angles(R_gt_rel)
-                euler_est = rotation_matrix_to_euler_angles(R_est)
-
-                print("\n--- Rotation Comparison (Roll, Pitch, Yaw) ---")
-                print(f"Ground Truth: {euler_gt[0]:.2f}°, {euler_gt[1]:.2f}°, {euler_gt[2]:.2f}°")
-                print(f"Estimated:    {euler_est[0]:.2f}°, {euler_est[1]:.2f}°, {euler_est[2]:.2f}°")
-                
-                print("\n--- Translation Comparison (Scaled) ---")
-                print(f"Ground Truth t: {t_gt_rel.T} (Scale: {true_scale:.4f})")
-                print(f"Estimated t:    {t_est_scaled.T}")
-
-                # --- 5. Evaluate using the SCALED t ---
-                K_eval = res.get('K') # Use our new estimated K
-                if K_eval is None: # Fallback if K wasn't estimated
-                   K_eval = calib.get('K0', calib.get('K')) 
-                   
-                metrics = evaluate_pose_accuracy(R_est, t_est_scaled, R_gt_rel, t_gt_rel, res.get('ptsL'), res.get('ptsR'), K_eval)
-                print("Pose Evaluation Metrics:")
-                print(metrics)
-            else:
-                warn("Pose estimation (R or t) was None, cannot evaluate.")
+        boxesL, clsL, confL, masked_L = segment_and_get_largest_box(L_enh, yolo_weights,
+                                                                    save_mask_path=os.path.join(OUTPUT_DIR, "05_left_seg_mask.png"))
+        boxesR, clsR, confR, masked_R = segment_and_get_largest_box(R_enh, yolo_weights,
+                                                                    save_mask_path=os.path.join(OUTPUT_DIR, "06_right_seg_mask.png"))
     except Exception as e:
-        warn(f"Could not evaluate ground-truth pose: {e}")
-        import traceback
-        traceback.print_exc()
+        if LOGGING_ENABLED:
+            warn(f"Segmentation failed: {e}. Falling back to whole-image.")
+        masked_L, masked_R = L_enh, R_enh
+        boxesL = np.zeros((0, 4)); boxesR = np.zeros((0, 4))
 
-    info(f"Total runtime: {time.time()-t0:.2f}s")
-    return results
+    # ROI extraction
+    def crop_from_box(img, box):
+        if getattr(box, "size", 0) == 0 or box is None:
+            return img, (0, 0)
+        b = [int(v) for v in box]
+        x1, y1, x2, y2 = max(0, b[0]), max(0, b[1]), min(img.shape[1], b[2]), min(img.shape[0], b[3])
+        return img[y1:y2, x1:x2], (x1, y1)
+
+    if len(boxesL) > 0 and len(boxesR) > 0:
+        roiL, originL = crop_from_box(masked_L, boxesL[0])
+        roiR, originR = crop_from_box(masked_R, boxesR[0])
+    else:
+        roiL, originL = masked_L, (0, 0)
+        roiR, originR = masked_R, (0, 0)
+
+    # centroid shift (image space) - useful as a sanity check translation
+    centroid_L = centroid_from_mask(masked_L)
+    centroid_R = centroid_from_mask(masked_R)
+    centroid_shift_px = None
+    if centroid_L is not None and centroid_R is not None:
+        centroid_shift_px = centroid_R - centroid_L
+        if LOGGING_ENABLED:
+            info(f"centroid pixel shift (R - L): {centroid_shift_px}")
+
+    # ---------- Matching chain ----------
+    def run_matching(roiL_img, roiR_img):
+        # 1) LoFTR on edges
+        if LOGGING_ENABLED:
+            info("Trying LoFTR on edges...")
+        try:
+            k1_e, k2_e, m_e = loftr_on_edges(roiL_img, roiR_img, obj_class="roi")
+        except Exception as e:
+            k1_e, k2_e, m_e = [], [], []
+            if LOGGING_ENABLED:
+                warn(f"loftr_on_edges failed: {e}")
+
+        if len(m_e) >= 30:
+            return k1_e, k2_e, m_e
+
+        # 2) raw LoFTR
+        if LOGGING_ENABLED:
+            info("Trying raw LoFTR...")
+        try:
+            k1_r, k2_r, m_r = match_features_loftr(roiL_img, roiR_img)
+        except Exception as e:
+            k1_r, k2_r, m_r = [], [], []
+            if LOGGING_ENABLED:
+                warn(f"raw LoFTR failed: {e}")
+
+        if len(m_r) >= 20:
+            return k1_r, k2_r, m_r
+
+        # 3) SIFT-on-edges
+        if LOGGING_ENABLED:
+            info("Trying SIFT-on-edges...")
+        try:
+            kL_e, dL_e, _ = sift_on_edges(roiL_img)
+            kR_e, dR_e, _ = sift_on_edges(roiR_img)
+            m_sf = match_descriptors_flann(dL_e, dR_e)
+        except Exception as e:
+            kL_e, kR_e, m_sf = [], [], []
+            if LOGGING_ENABLED:
+                warn(f"sift_on_edges failed: {e}")
+
+        if len(m_sf) >= 12:
+            return kL_e, kR_e, m_sf
+
+        # 4) plain SIFT+FLANN
+        if LOGGING_ENABLED:
+            info("Trying plain SIFT+FLANN...")
+        try:
+            kL_s, dL_s = extract_features_sift(roiL_img)
+            kR_s, dR_s = extract_features_sift(roiR_img)
+            m_s = match_descriptors_flann(dL_s, dR_s)
+        except Exception as e:
+            kL_s, kR_s, m_s = [], [], []
+            if LOGGING_ENABLED:
+                warn(f"plain SIFT fallback failed: {e}")
+
+        if len(m_s) >= 8:
+            return kL_s, kR_s, m_s
+
+        return [], [], []
+
+    kps1, kps2, matches = run_matching(roiL, roiR)
+
+    if len(matches) < 8:
+        if LOGGING_ENABLED:
+            warn(f"Insufficient matches ({len(matches)}). Aborting.")
+        return None, None, None
+
+    # Build global image coords arrays
+    try:
+        ptsL = np.array([kps1[m.queryIdx].pt for m in matches]) + np.array(originL)
+        ptsR = np.array([kps2[m.trainIdx].pt for m in matches]) + np.array(originR)
+    except Exception as e:
+        if LOGGING_ENABLED:
+            warn(f"Failed building pts arrays from matches: {e}")
+        return None, None, None
+
+    # optional draw matches
+    try:
+        draw_matches(roiL, kps1, roiR, kps2, matches,
+                     fname=os.path.join(OUTPUT_DIR, "roi_matches.png"),
+                     title="ROI Matches")
+    except Exception:
+        pass
+
+    # ---------- Homography ----------
+    H, maskH = cv2.findHomography(ptsL, ptsR, cv2.RANSAC, 3.0)
+    if H is None:
+        if LOGGING_ENABLED:
+            warn("findHomography returned None.")
+        return None, None, None
+    maskH = maskH.ravel().astype(bool)
+    inlier_count = int(np.sum(maskH))
+    if LOGGING_ENABLED:
+        info(f"Homography inliers: {inlier_count}/{len(matches)}")
+
+    # decompose homography (handle opencv variations)
+    try:
+        decomp = cv2.decomposeHomographyMat(H, Kmat)
+        # decomp may contain retval on some versions
+        if len(decomp) == 4:
+            _, Rs, Ts, normals = decomp
+        elif len(decomp) == 3:
+            Rs, Ts, normals = decomp
+        else:
+            if LOGGING_ENABLED:
+                warn(f"Unexpected decomposeHomographyMat result len={len(decomp)}")
+            return None, None, None
+        Rs = list(Rs)
+        Ts = list(Ts)
+        normals = list(normals)
+        if len(Rs) == 0:
+            if LOGGING_ENABLED:
+                warn("decomposeHomographyMat returned zero candidates.")
+            return None, None, None
+    except Exception as e:
+        if LOGGING_ENABLED:
+            warn(f"decomposeHomographyMat failed: {e}")
+        return None, None, None
+
+    best_idx = pick_best_homography_candidate(Rs, Ts, normals, ptsL[maskH], ptsR[maskH], Kmat)
+    if best_idx is None:
+        best_idx = 0
+    R_est = Rs[best_idx].astype(float)
+    t_est = Ts[best_idx].reshape(3, 1).astype(float)
+    normal_est = normals[best_idx].reshape(3, 1).astype(float)
+
+    euler_est = rotation_matrix_to_euler_angles(R_est)
+
+    # compute reprojection RMS (homography projection)
+    ptsL_h = np.hstack([ptsL, np.ones((ptsL.shape[0], 1))])
+    proj = (H @ ptsL_h.T).T
+    proj = proj[:, :2] / proj[:, 2:3]
+    reproj_errs = np.linalg.norm(proj - ptsR, axis=1)
+    reproj_rms = float(np.sqrt(np.mean(reproj_errs[maskH]**2))) if np.sum(maskH) > 0 else float(np.sqrt(np.mean(reproj_errs**2)))
+
+    # Prepare results
+    res = {
+        "R": R_est,
+        "t": t_est,
+        "normal": normal_est,
+        "H": H,
+        "K": Kmat,
+        "ptsL": ptsL,
+        "ptsR": ptsR,
+        "inliers_mask": maskH,
+        "reproj_rms_px": reproj_rms,
+        "centroid_shift_px": centroid_shift_px,
+        "inlier_count": inlier_count
+    }
+
+    # per-frame metrics placeholder
+    per_frame_metrics = {
+        "roll_err": None,
+        "pitch_err": None,
+        "yaw_err": None,
+        "rot_err_deg": None,
+        "trans_dir_err_deg": None,
+        "trans_scale_err_pct": None,
+        "rms_px": reproj_rms
+    }
+
+    metrics = None
+    # Evaluate vs GT if provided
+    if gt_pose_cur is not None and gt_pose_next is not None:
+        try:
+            R_next = np.array(gt_pose_next[3])
+            R_cur = np.array(gt_pose_cur[3])
+            t_next = np.array([float(x) for x in gt_pose_next[0:3]]).reshape(3, 1)
+            t_cur = np.array([float(x) for x in gt_pose_cur[0:3]]).reshape(3, 1)
+
+            R_gt_rel = R_next @ R_cur.T
+            t_gt_rel = (t_next - R_gt_rel @ t_cur).reshape(3, 1)
+
+            # scale t_est to gt magnitude (for comparison only)
+            scale = float(np.linalg.norm(t_gt_rel) + 1e-12)
+            t1 = t_est * scale
+            t2 = -t_est * scale
+            t_est_scaled = t1 if np.linalg.norm(t1 - t_gt_rel) < np.linalg.norm(t2 - t_gt_rel) else t2
+
+            euler_gt = rotation_matrix_to_euler_angles(R_gt_rel)
+
+            # axis errors
+            roll_err = float(abs(euler_gt[0] - euler_est[0]))
+            pitch_err = float(abs(euler_gt[1] - euler_est[1]))
+            yaw_err = float(abs(euler_gt[2] - euler_est[2]))
+
+            per_frame_metrics.update({
+                "roll_err": roll_err,
+                "pitch_err": pitch_err,
+                "yaw_err": yaw_err,
+            })
+
+            # compute full metrics via evaluate_pose_accuracy if available
+            try:
+                metrics = evaluate_pose_accuracy(R_est, t_est_scaled, R_gt_rel, t_gt_rel, ptsL[maskH], ptsR[maskH], Kmat)
+                # ensure numeric types
+                for k, v in metrics.items():
+                    try:
+                        metrics[k] = float(v)
+                    except Exception:
+                        pass
+                # fill per_frame rotational + others if evaluate returns them
+                if "rot_err_deg" in metrics:
+                    per_frame_metrics["rot_err_deg"] = metrics["rot_err_deg"]
+                if "trans_dir_err_deg" in metrics:
+                    per_frame_metrics["trans_dir_err_deg"] = metrics["trans_dir_err_deg"]
+                if "trans_scale_err_pct" in metrics:
+                    per_frame_metrics["trans_scale_err_pct"] = metrics["trans_scale_err_pct"]
+                if "rms_px" in metrics:
+                    per_frame_metrics["rms_px"] = metrics["rms_px"]
+            except Exception:
+                # fallback manual simple metrics
+                Rdiff = R_est @ R_gt_rel.T
+                angle = np.arccos(np.clip((np.trace(Rdiff) - 1) / 2, -1, 1))
+                rot_err_deg = float(np.degrees(abs(angle)))
+                td1 = (t_est_scaled.ravel() / (np.linalg.norm(t_est_scaled) + 1e-12))
+                td2 = (t_gt_rel.ravel() / (np.linalg.norm(t_gt_rel) + 1e-12))
+                trans_dir_err_deg = float(np.degrees(np.arccos(np.clip(np.dot(td1, td2), -1, 1))))
+                trans_scale_err_pct = float(abs(np.linalg.norm(t_est_scaled) - np.linalg.norm(t_gt_rel)) / (np.linalg.norm(t_gt_rel) + 1e-12) * 100.0)
+                metrics = {
+                    "rot_err_deg": rot_err_deg,
+                    "trans_dir_err_deg": trans_dir_err_deg,
+                    "trans_scale_err_pct": trans_scale_err_pct,
+                    "rms_px": float(reproj_rms)
+                }
+                per_frame_metrics.update({
+                    "rot_err_deg": rot_err_deg,
+                    "trans_dir_err_deg": trans_dir_err_deg,
+                    "trans_scale_err_pct": trans_scale_err_pct,
+                })
+
+            # Logging
+            if LOGGING_ENABLED:
+                info("\n=== POSE COMPARISON ===")
+                info(f"Ground truth (Euler deg): {np.round(euler_gt, 3)}")
+                info(f"Estimated    (Euler deg): {np.round(euler_est, 3)}")
+                info(f"GT translation: {t_gt_rel.ravel()}")
+                info(f"Estimated translation (scaled): {t_est_scaled.ravel()}")
+                info(f"Reproj RMS (px): {reproj_rms}")
+                info("========================\n")
+
+        except Exception as e:
+            if LOGGING_ENABLED:
+                warn(f"Pose evaluation failed: {e}")
+            metrics = None
+
+    results = [res]
+    if LOGGING_ENABLED:
+        info(f"Total runtime: {time.time() - t0:.2f}s")
+
+    return results, metrics, per_frame_metrics

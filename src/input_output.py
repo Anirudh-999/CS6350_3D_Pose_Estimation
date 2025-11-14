@@ -5,32 +5,32 @@ from custom_logging import info, warn, show_and_save
 from typing import Dict
 import math
 
-# LEFT_IMG_PATH  = "images/img2.png"      # path to left image
-# RIGHT_IMG_PATH = "images/img1.png"      # path to right image
-
-LEFT_IMG_PATH  = "../images/img3.jpeg"      # path to left image
-RIGHT_IMG_PATH = "../images/img4.jpeg"      # path to right image
-
-CALIB_PATH     = "calib.txt"      # optional KITTI-style calib (P0/P1 or K)
-YOLO_WEIGHTS   = "yolov8l.pt"     # optional (if ultralytics installed)
-OUTPUT_DIR     = "./output"       # where we save visualizations
-USE_GPU        = True             # preference flag
+YOLO_WEIGHTS   = "yolov8l.pt"     
+OUTPUT_DIR     = "./output"       
+USE_GPU        = True             
 
 def load_image_rgb(path: str) -> np.ndarray:
+    """
+    Load an image from disk and convert to RGB format.
+    
+    returns RGB image as np.ndarray.
+    """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Image not found: {path}")
     bgr = cv2.imread(path)
     if bgr is None:
         raise RuntimeError(f"cv2 failed to read: {path}")
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    #show_and_save(rgb, title=os.path.basename(path), fname=os.path.basename(path), output_dir=OUTPUT_DIR)
     return rgb
 
 def load_calibration_kitti_like(path: str) -> Dict[str, np.ndarray]:
+
     """
     Parse a KITTI-style text file with P0:, P1:, ... or K, K0, K1 lines.
+
     Returns dict possibly containing 'P0','P1','K0','K1','baseline'.
     """
+
     if not os.path.exists(path):
         warn("Calibration file not found, proceeding without calibration.")
         return {}
@@ -61,6 +61,7 @@ def load_calibration_kitti_like(path: str) -> Dict[str, np.ndarray]:
 
 def yaw_from_R(R, R_ref=None):
     """
+
     Return yaw angle(s) in degrees from rotation matrix R.
     If R_ref is provided, calculate relative yaw with respect to R_ref.
     """
@@ -79,6 +80,12 @@ def yaw_from_R(R, R_ref=None):
         return {}
 
 def yaw_from_pointcloud_pca(pts3):
+    """
+    Estimate yaw angle (degrees) from 3D point cloud using PCA.
+    Assumes points are roughly on a horizontal plane.
+
+    returns yaw angle in degrees.
+    """
     if pts3.shape[0] < 3:
         return None
     pts = pts3 - pts3.mean(axis=0)
@@ -90,6 +97,11 @@ def yaw_from_pointcloud_pca(pts3):
     return yaw
 
 def visualize_keypoints(img_rgb, kps, fname="keypoints.png", title="Keypoints"):
+    """
+    Visualize keypoints on an RGB image and save to disk.
+
+    returns None.
+    """
     img = img_rgb.copy()
     kps_cv = [cv2.KeyPoint(x=float(p[0]), y=float(p[1]), _size=3) if not hasattr(p,'pt') else p for p in kps]
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)

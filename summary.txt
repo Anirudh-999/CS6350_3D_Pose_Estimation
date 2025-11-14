@@ -1,0 +1,48 @@
+--------custom_logging.py
+# info 
+# warn
+# err
+# show_and-save ( saves and logs the message)
+
+---------preprocessing.py
+
+YOLO, FastSAM
+
+# enhance_contrast
+# segment_and_get_largest_box (creating or segmentation of the mask)
+# detect_yolo (yolo object detection - not being used)
+# refine_matches_photometric ( Lucas kanade optical flow -> points are refined )
+
+---------midas_estimate
+
+# estimate_focal_length (estimates the focal length of an image and gives k)
+# create_point_cloud (projecting points into 3d using focal length and depth)
+# normalize_point_cloud (normalized point colud from the before point cloud) 
+# estimate_pose_with_midas_icp (function to estimate pose (R, t) using MiDaS and ICP.)
+
+--------input_ouput.py
+
+# load_image_rgb 
+# load_calibration_kitti_like (Parse a KITTI-style text file)
+# yaw_from_R (calculate the change in angles in degrees from R)
+# yaw_from_pointcloud_pca (Estimate yaw angle (degrees) from 3D point cloud using PCA.)
+# visualize_keypoints (Visualize keypoints on an RGB image and save to disk)
+
+---------triangulation_estimation.py
+
+# triangulate_with_P (form a triangle with known values - triangulation -> 3d point)
+# icp_refine (Refine alignment between observed_pts and model_pts using ICP.)
+# bundle_adjustment (Refine R, t by minimizing geometric reprojection error)
+# refine_pose_with_bundle_adjustment (Wrapper for bundle adjustment to refine pose parameters)
+
+-----------feature_extraction.py
+
+# extract_features_sift
+# extract_features_orb
+# match_descriptors_flann
+# draw_matches (Draw matches between two images and save to disk)
+# _load_torch_image_gray (Converts a CV2 RGB image to a grayscale torch tensor)
+# match_features_loftr (Matches features using LoFTR)
+
+--------epipolar_geometry.py
+

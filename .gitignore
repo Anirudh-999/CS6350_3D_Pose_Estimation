@@ -6,6 +6,11 @@ venv/
 calib.txt
 TPA_12.pdf
 download.pdf
-dataset
+dataset/
 Dataset_coke
 rgbd_dataset_freiburg3_cabinet.tgz
+yolov8l-seg.pt
+yolov8l.pt
+/src/FastSAM-s.pt
+/src/yolov8l-seg.pt
+dataset_coke

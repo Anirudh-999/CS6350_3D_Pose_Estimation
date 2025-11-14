@@ -1,13 +1,13 @@
 import cv2
 import numpy as np
-from custom_logging import info, warn, show_and_save
+from custom_logging import info, warn, show_and_save, LOGGING_ENABLED
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation as R_transform
 
-# --- NEW HELPER FUNCTION (Moved from data_handling.py) ---
 def rotation_matrix_to_euler_angles(R):
     """
     Convert a rotation matrix to Euler angles (in degrees).
+
     Returns angles as [roll, pitch, yaw] in ZYX order (extrinsic).
     """
     if R is None:
@@ -27,16 +27,26 @@ def rotation_matrix_to_euler_angles(R):
 
     return np.degrees(np.array([x, y, z]))
 
-# --- KEPT FROM YOUR ORIGINAL ---
 def estimate_fundamental(pts1, pts2):
+    """
+    Estimate the Fundamental matrix from point correspondences using RANSAC.
+    
+    returns F (3x3) and inlier mask.
+    """
     if pts1.shape[0] < 8:
         warn("Need at least 8 points to estimate Fundamental matrix reliably.")
         return None, None
     F, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, 1.0, 0.99) # Tighter threshold
     return F, mask
 
-# --- KEPT FROM YOUR ORIGINAL ---
+
 def draw_epipolar_lines(img1, img2, pts1, pts2, F, fname):
+
+    """
+    Draw epipolar lines on the two images given point correspondences and Fundamental matrix.
+    returns None.
+    """
+
     if F is None or pts1 is None or pts2 is None or pts1.shape[0] == 0 or pts2.shape[0] == 0:
         warn("No fundamental matrix or point correspondences to draw epipolar lines.")
         return
@@ -75,13 +85,14 @@ def draw_epipolar_lines(img1, img2, pts1, pts2, F, fname):
     show_and_save(vis, "Epipolar lines L|R", fname)
 
 
-# --- THIS IS THE MAIN NEW FUNCTION ---
-# It replaces your old estimate_essential_and_pose
 def self_calibrate_and_find_pose(pts1, pts2, K_guess, img_shape):
+
     """
-    Robustly finds K, R, and t from "near-planar" features.
+    finds K, R, and t from "near-planar" features.
     It separates planar (H) from non-planar (F) points to
     get a stable pose.
+
+    returns R (3x3), t (3x1), K (3x3), non_planar_mask (bool array)
     """
     h, w = img_shape[:2]
     
@@ -207,12 +218,12 @@ def evaluate_pose_accuracy(R_pred, t_pred, R_gt, t_gt, pts1=None, pts2=None, K=N
             t_mag_err = (np.abs(t_mag_pred - t_mag_gt) / t_mag_gt) * 100
     
     rms = reprojection_rms(pts1, pts2, R_pred, t_pred, K) if pts1 is not None else None
-    
-    print("---- Pose Accuracy ----")
-    print(f"Rotation error: {r_err:.3f}°" if r_err is not None else "Rotation error: N/A")
-    print(f"Translation dir. error: {t_dir_err:.3f}°" if t_dir_err is not None else "Translation error: N/A")
-    print(f"Translation scale error: {t_mag_err:.2f}%" if t_mag_err is not None else "Translation scale error: N/A")
-    if rms is not None:
-        print(f"Reprojection RMS: {rms:.3f} px")
-    print("------------------------")
-    return {"rot_err_deg": r_err, "trans_dir_err_deg": t_dir_err, "trans_scale_err_pct": t_mag_err, "rms_px": rms}
+    if LOGGING_ENABLED:
+        print("---- Pose Accuracy ----")
+        print(f"Rotation error: {r_err:.3f}°" if r_err is not None else "Rotation error: N/A")
+        print(f"Translation dir. error: {t_dir_err:.3f}°" if t_dir_err is not None else "Translation error: N/A")
+        print(f"Translation scale error: {t_mag_err:.2f}%" if t_mag_err is not None else "Translation scale error: N/A")
+        if rms is not None:
+            print(f"Reprojection RMS: {rms:.3f} px")
+        print("------------------------")
+    return {"rot_err_deg": r_err, "trans_dir_err_deg": t_dir_err, "trans_scale_err_pct": t_mag_err, "rms_px": rms}  
