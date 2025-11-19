@@ -1,82 +1,43 @@
-## 3D Pose Change Estimation (Uncalibrated Two-View)
+# CS6350: 3D Pose Estimation from Two Uncalibrated Views
 
-This repository implements a pipeline for estimating the **6-DoF relative pose change** of a *near-planar object* using only **two uncalibrated RGB images**.
-
-This project was developed as part of the **CS6350 -- Computer Vision** coursework at IIT Madras.
-
----
-
-### Key Idea and Methodology
-
-Recovering 3D pose change from two uncalibrated images is inherently challenging due to the absence of camera intrinsic parameters, the non-recoverability of translation scale, and the failure of standard feature matching on near-planar, low-texture objects.
-
-The system addresses these limitations by employing a strategy based on **segmentation**, **edge-aware feature matching**, and **homography decomposition**.
+## Overview
+This repository implements a pipeline for estimating the relative 6-DoF pose between two uncalibrated RGB images of a near-planar object. The objective is to assess whether reliable pose change can be recovered without camera intrinsics, depth information, or multi-view constraints.
 
 ---
 
-### Pipeline Overview
+## Method Summary
 
-The complete estimation process involves five sequential steps:
+### 1. Segmentation and ROI Extraction
+The target object is isolated using FastSAM.  
+A tight region of interest (ROI) is extracted to remove background features and improve feature matching quality.
 
-1.  **Segmentation (FastSAM)**
-    * Extracts the precise object mask.
-    * Crops a tight Region of Interest (ROI) around the object.
-    * Effectively removes background clutter.
-2.  **Edge-Aware Matching**
-    * Computes image edges using the Canny detector.
-    * Restricts LoFTR matches to lie on computed edge pixels.
-    * Filters SIFT matches using the edge map for increased robustness.
-    * Includes a fallback to raw LoFTR or SIFT matching if edge matching yields insufficient points.
-3.  **Homography Estimation**
-    * Performs RANSAC-based estimation of the homography matrix ($H$).
-    * Approximates the camera intrinsic parameters ($K$) as:
-        $$f_x = f_y = \max(W, H)$$
-        $$c_x = W/2, c_y = H/2$$
-        where $W$ and $H$ are the image width and height.
-4.  **Homography Decomposition**
-    * Extracts candidate triplets of Rotation ($R$), Translation ($t$), and Plane Normal ($n$).
-    * Filters physically invalid solutions.
-    * Selects the optimal (R, t, n) triplet using geometric heuristics.
-5.  **Evaluation (Using TUM RGB-D Ground Truth)**
-    * Quantifies Rotation error.
-    * Quantifies Translation direction error.
-    * Calculates the Reprojection Root Mean Square (RMS) error.
+### 2. Edge-Aware Feature Matching
+Canny edges are detected on each ROI to identify reliable geometric boundaries.  
+LoFTR provides dense feature correspondences, which are filtered to keep only edge-aligned pairs.  
+Fallback strategies (raw LoFTR and SIFT) are used when edge matches are insufficient.
+
+### 3. Homography Estimation
+RANSAC is applied to the matched points to robustly estimate a planar homography mapping between the two views.
+
+### 4. Homography Decomposition
+The homography is decomposed into rotation and translation candidates using an assumed intrinsic matrix (uncalibrated).  
+Invalid solutions are discarded using geometric consistency checks.
+
+### 5. Evaluation
+Ground-truth poses from the TUM RGB-D dataset are used **only for evaluation**, not during estimation.  
+Metrics include:
+- rotation error (degrees)
+- translation-direction error
+- translation-scale error
+- reprojection RMS error
 
 ---
 
-### Results Summary
-
-| Motion Type | Pairs | Rotation Error (MAE) | Translation Direction Error | Key Observations |
-| :--- | :--- | :--- | :--- | :--- |
-| **Small-frame** | $\approx 1100$ | $\approx 0.6^{\circ}$ | High (Inherent limitation of homography) | High accuracy for Roll and Pitch rotations. Yaw rotation is unstable due to planar geometry. Scale is fundamentally unrecoverable. |
-| **Large-frame** | $\approx 1000$ | Rises to $\approx 9^{\circ}$ | N/A | Failures correlate with ambiguous homography decomposition selecting an incorrect branch. Reprojection RMS remains low, confirming correct feature matching despite decomposition failure. |
+## Dataset
+Experiments use only the RGB images from the TUM RGB-D dataset.  
+Depth and camera intrinsics are intentionally excluded to maintain the uncalibrated monocular setting.
 
 ---
 
-### Insights and Limitations
+## Repository Structure
 
-#### Strengths
-
-* Robust and stable homography estimation achieved through edge-aware feature matching.
-* Accurate Roll and Pitch rotation recovery for near-planar objects.
-
-#### Limitations
-
-* Translation is only recovered up to an arbitrary scale factor.
-* Yaw rotation is poorly constrained and observed in planar configurations.
-* Large viewpoint changes lead to ambiguity in homography decomposition results.
-
----
-
-### Requirements
-
-* Python 3.8+
-* OpenCV
-* PyTorch
-* LoFTR model files
-* FastSAM
-* NumPy, Matplotlib
-
----
-
-### Repository Structure
