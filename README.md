@@ -36,6 +36,6 @@ Metrics include:
 ## Dataset
 Experiments use only the RGB images from the TUM RGB-D dataset.  
 Depth and camera intrinsics are intentionally excluded to maintain the uncalibrated monocular setting.
-
-
+https://cvg.cit.tum.de/data/datasets/rgbd-dataset
+https://cvg.cit.tum.de/data/datasets/rgbd-dataset
 
