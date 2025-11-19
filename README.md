@@ -37,7 +37,5 @@ Metrics include:
 Experiments use only the RGB images from the TUM RGB-D dataset.  
 Depth and camera intrinsics are intentionally excluded to maintain the uncalibrated monocular setting.
 
----
 
-## Repository Structure
 
