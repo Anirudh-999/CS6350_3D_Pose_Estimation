@@ -142,7 +142,7 @@ def self_calibrate_and_find_pose(pts1, pts2, K_guess, img_shape):
         return (S[0] - S[1]) ** 2 
 
     f_init = K_guess[0, 0]
-    result = minimize(cost_function, [f_init], bounds=[(100, 4000)], method='L-BFGS-B')
+    result = minimize(cost_function, [f_init], bounds=[(100, 10000)], method='L-BFGS-B')
     f_optimized = float(result.x[0])
     
     K_optimized = K_guess.copy()
@@ -167,16 +167,13 @@ def self_calibrate_and_find_pose(pts1, pts2, K_guess, img_shape):
     info(f"Recovered pose with {np.sum(mask_pose)} inliers (from {len(clean_pts1)} non-planar pts)")
     
     return R_est, t_est, K_optimized, non_planar_mask
-
-
-# --- KEPT FROM YOUR ORIGINAL ---
+ 
 def rotation_angle_error_deg(R_pred, R_gt):
     if R_pred is None or R_gt is None: return None
     R_err = R_gt.T @ R_pred
     rot = R_transform.from_matrix(R_err)
     return float(np.degrees(rot.magnitude()))
 
-# --- KEPT FROM YOUR ORIGINAL ---
 def translation_direction_error_deg(t_pred, t_gt):
     if t_pred is None or t_gt is None: return None
     tp = np.asarray(t_pred).ravel().astype(float)
@@ -188,7 +185,6 @@ def translation_direction_error_deg(t_pred, t_gt):
     dot = np.clip(np.dot(tp, tg), -1.0, 1.0)
     return float(np.degrees(np.arccos(dot)))
 
-# --- KEPT FROM YOUR ORIGINAL ---
 def reprojection_rms(pts1, pts2, Rmat, tvec, K):
     if pts1 is None or pts2 is None or Rmat is None or tvec is None or K is None or len(pts1) < 1:
         return None
@@ -203,7 +199,6 @@ def reprojection_rms(pts1, pts2, Rmat, tvec, K):
     diff = pts2 - proj2
     return float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
 
-# --- MODIFIED FROM YOUR ORIGINAL (Added translation magnitude error) ---
 def evaluate_pose_accuracy(R_pred, t_pred, R_gt, t_gt, pts1=None, pts2=None, K=None):
     """Convenience wrapper that prints rotation, translation, and RMS errors."""
     r_err = rotation_angle_error_deg(R_pred, R_gt)

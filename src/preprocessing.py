@@ -127,12 +127,12 @@ def segment_and_get_largest_box(img_rgb, model_path="yolov8l-seg.pt", save_mask_
         x, y, w, h = cv2.boundingRect(main_contour)
         
         # Save the mask visualization
-        if save_mask_path:
-            try:
-                # Use the 'masked_image' we already created
-                show_and_save(masked_image, title=f"Used Segment Mask (FastSAM)", fname=save_mask_path[10:], output_dir=save_mask_path)
-            except Exception as e:
-                warn(f"Could not save segmentation mask: {e}")
+        # if save_mask_path:
+        #     try:
+        #         # Use the 'masked_image' we already created
+        #         show_and_save(masked_image, title=f"Used Segment Mask (FastSAM)", fname= save_mask_path)
+        #     except Exception as e:
+        #         warn(f"Could not save segmentation mask: {e}")
         
         # Format as [x1, y1, x2, y2]
         box = np.array([[x, y, x + w, y + h]])

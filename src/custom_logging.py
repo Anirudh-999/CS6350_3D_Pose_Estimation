@@ -2,7 +2,7 @@ from matplotlib import pyplot as plt
 import os
 import logging
 import cv2
-LOGGING_ENABLED = False
+LOGGING_ENABLED = True
 OUTPUT_DIR = "./output"
 
 # Configure logging
