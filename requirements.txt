@@ -1,6 +1,10 @@
-ultralytics
 numpy
 opencv-python
-pandas
+scipy
 matplotlib
+pandas
+tqdm
+ultralytics
 torch
+kornia
+open3d
