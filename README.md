@@ -35,6 +35,32 @@ Metrics include:
 * **Python:** Version 3.8 or newer.
 * **Hardware:** A generic CPU is sufficient.
 
+## 7 Installation Guide
+
+### **1. Clone the Repository**
+
+```bash
+git clone https://github.com/ANIRUDH-999/CS6350.git
+cd CS6350
+```
+### **2. Create a Python Virtual Environment**
+```bash
+python -m venv venv
+```
+### **3. Activate the Environment**
+Windows
+```bash
+.\venv\Scripts\activate
+```
+macOS / Linux
+```bash
+source venv/bin/activate
+```
+### **4. Install Dependencies**
+```bash
+pip install -r requirements.txt
+```
+
 ### Folder Structure
 Ensure your folders are organized exactly like this. The code relies on specific relative paths (e.g., `../dataset/`).
 
@@ -63,31 +89,6 @@ project_root/
         ├── image1.png
         └── ...
 ```
-## 7 Installation Guide
-
-### **1. Clone the Repository**
-
-```bash
-git clone https://github.com/ANIRUDH-999/CS6350.git
-cd CS6350
-```
-### **2. Create a Python Virtual Environment**
-```bash
-python -m venv venv
-```
-### **3. Activate the Environment**
-Windows
-```bash
-.\venv\Scripts\activate
-```
-macOS / Linux
-```bash
-source venv/bin/activate
-```
-### **4. Install Dependencies**
-```bash
-pip install -r requirements.txt
-```
 
 ## 8 Run pipeline
 ```bash
@@ -95,7 +96,7 @@ cd src
 python data_handling.py
 ```
 
-## 8 Dataset setup
+## 9 Dataset setup
 
 [https://cvg.cit.tum.de/data/datasets/rgbd-dataset](https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download)
 
