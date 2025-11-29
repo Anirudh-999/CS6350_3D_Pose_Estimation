@@ -522,7 +522,8 @@ def run_pipeline(left_path = None,
                  gt_pose_cur=None, 
                  gt_pose_next=None, 
                  K_mat_override=None,
-                 segmentation_enabled=True):
+                 segmentation_enabled=True,
+                 mask_area_threshold=200):
     
     """
     Main pipeline:
@@ -554,11 +555,11 @@ def run_pipeline(left_path = None,
     h1, w1 = L.shape[:2]
     h2, w2 = R.shape[:2]
 
-    scale1 = 800/h1
-    scale2 = 800/h2
+    scale1 = 400/h1
+    scale2 = 400/h2
 
-    L = cv2.resize(L, (int(w1*scale1), 800))
-    R = cv2.resize(R, (int(w2*scale2), 800))
+    L = cv2.resize(L, (int(w1*scale1), 400))
+    R = cv2.resize(R, (int(w2*scale2), 400))
 
     if LOGGING_ENABLED:
         safe_show_and_save(L, "Left Image", "01_left.png")
@@ -608,51 +609,75 @@ def run_pipeline(left_path = None,
 
     if segmentation_enabled:
         try:
-            boxesL, clsL, confL, masked_L = segment_and_get_largest_box(L_enh,
-                                                                        save_mask_path = "05_left_seg_mask.png")
-            boxesR, clsR, confR, masked_R = segment_and_get_largest_box(R_enh,
-                                                                        save_mask_path= "06_right_seg_mask.png")
+            boxesL, clsL, confL, maskL = segment_and_get_largest_box(
+                L_enh, save_mask_path="05_left_seg_mask.png"
+            )
+            boxesR, clsR, confR, maskR = segment_and_get_largest_box(
+                R_enh, save_mask_path="06_right_seg_mask.png"
+            )
         except Exception as e:
-            if LOGGING_ENABLED:
-                warn(f"Segmentation failed: {e}. Falling back to whole-image.")
-            masked_L, masked_R = L_enh, R_enh
-            boxesL = np.zeros((0, 4)); boxesR = np.zeros((0, 4))
+            warn(f"Segmentation failed ({e}). Using full image.")
+            maskL, maskR = L_enh, R_enh
+            boxesL, boxesR = [], []
 
-        # ROI extraction
-        def crop_from_box(img, box):
-            if getattr(box, "size", 0) == 0 or box is None:
-                return img, (0, 0)
-            b = [int(v) for v in box]
-            x1, y1, x2, y2 = max(0, b[0]), max(0, b[1]), min(img.shape[1], b[2]), min(img.shape[0], b[3])
-            return img[y1:y2, x1:x2], (x1, y1)
+        # Convert segmentation output to masked images:
+        masked_L = maskL
+        masked_R = maskR
 
-        if len(boxesL) > 0 and len(boxesR) > 0:
-            roiL, originL = crop_from_box(masked_L, boxesL[0])
-            roiR, originR = crop_from_box(masked_R, boxesR[0])
-        else:
-            roiL, originL = masked_L, (0, 0)
-            roiR, originR = masked_R, (0, 0)
+        # Compute mask areas
+        areaL = np.count_nonzero(cv2.cvtColor(masked_L, cv2.COLOR_RGB2GRAY))
+        areaR = np.count_nonzero(cv2.cvtColor(masked_R, cv2.COLOR_RGB2GRAY))
 
         show_and_save(masked_L, "Masked Left",  "05_masked_left.png")
         show_and_save(masked_R, "Masked Right", "06_masked_right.png")
 
-        # centroid shift (image space) 
-        centroid_L = centroid_from_mask(masked_L)
-        centroid_R = centroid_from_mask(masked_R)
+        # --- ROI extraction helper ---
+        def crop_from_box(img, box, enlarge_factor=1.15):
+            if box is None or len(box) == 0:
+                return img, (0, 0)
 
-        if centroid_L is not None and centroid_R is not None:
+            x1, y1, x2, y2 = [int(v) for v in box]
+            w, h = x2 - x1, y2 - y1
 
-            centroid_shift_px = centroid_R - centroid_L
-            centroid_shift_px = centroid_shift_px.astype(float)
-            centroid_shift_px[0] = centroid_shift_px[0]*1.5
-            centroid_shift_px[1] = centroid_shift_px[1]*1.6
-            centroid_shift_px = np.array(centroid_shift_px)
-            print(type(centroid_shift_px))
+            dw = int((enlarge_factor - 1) * w / 2)
+            dh = int((enlarge_factor - 1) * h / 2)
 
-            if LOGGING_ENABLED:
-                info(f"centroid pixel shift (R - L): {centroid_shift_px}")
+            x1 = max(0, x1 - dw)
+            y1 = max(0, y1 - dh)
+            x2 = min(img.shape[1], x2 + dw)
+            y2 = min(img.shape[0], y2 + dh)
+
+            return img[y1:y2, x1:x2], (x1, y1)
+
+        # --- LEFT ROI selection ---
+        if areaL >= mask_area_threshold:
+            roiL, originL = masked_L, (0, 0)
+            info(f"Left: using segmentation mask (area={areaL})")
+        else:
+            if len(boxesL) > 0:
+                roiL, originL = crop_from_box(L_enh, boxesL[0])
+                warn(f"Left mask too small (area={areaL}). Using enlarged bbox.")
+            else:
+                roiL, originL = L_enh, (0, 0)
+                warn("Left: No mask and no bbox → using full enhanced image.")
+
+        # --- RIGHT ROI selection ---
+        if areaR >= mask_area_threshold:
+            roiR, originR = masked_R, (0, 0)
+            info(f"Right: using segmentation mask (area={areaR})")
+        else:
+            if len(boxesR) > 0:
+                roiR, originR = crop_from_box(R_enh, boxesR[0])
+                warn(f"Right mask too small (area={areaR}). Using enlarged bbox.")
+            else:
+                roiR, originR = R_enh, (0, 0)
+                warn("Right: No mask and no bbox → using full enhanced image.")
+
     else:
-        masked_L, masked_R = L_enh, R_enh 
+        # Segmentation disabled
+        masked_L, masked_R = L_enh, R_enh
+        roiL, originL = masked_L, (0, 0)
+        roiR, originR = masked_R, (0, 0)
 
         show_and_save(masked_L, "Masked Left",  "05_masked_left.png")
         show_and_save(masked_R, "Masked Right", "06_masked_right.png")

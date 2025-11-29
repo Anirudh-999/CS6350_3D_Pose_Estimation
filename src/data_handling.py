@@ -229,17 +229,19 @@ yaw_abs_err = []
 
 pair_indices = []
 
-for i in tqdm(range(1), desc="Processing pairs"):
+for i in tqdm(range(10), desc="Processing pairs"):
     cur_k = keys[i]
-    next_k = keys[i + 1]
+    next_k = keys[i + 20]
 
     cur = rgb_paths[cur_k]
     nxt = rgb_paths[next_k]
 
     try:
         out = run_pipeline(
-            left_path= r"../dataset/rgb/img1_1.jpg",
-            right_path= r"../dataset/rgb/img1_2(r_30).jpg",
+            # left_path= r"../dataset/rgb/final_test_1.png",
+            # right_path= r"../dataset/rgb/final_test_2.png",
+            left_path= cur["image"],
+            right_path= nxt["image"],
             calib_path=CALIB_PATH,
             gt_pose_cur=cur["pose"],
             gt_pose_next=nxt["pose"],
@@ -301,7 +303,7 @@ for i in tqdm(range(1), desc="Processing pairs"):
     if not np.isnan(euler_est).any():
         euler_est[0] = euler_est[0] * 0.5
         euler_est[1] = euler_est[1] * -0.5
-        euler_est[2] = euler_est[2] * -1
+        euler_est[2] = euler_est[2] 
     
     roll_est_list.append(float(euler_est[0]) if not np.isnan(euler_est[0]) else np.nan)
     pitch_est_list.append(float(euler_est[1]) if not np.isnan(euler_est[1]) else np.nan)
