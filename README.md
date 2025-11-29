@@ -35,10 +35,6 @@ Metrics include:
 * **Python:** Version 3.8 or newer.
 * **Hardware:** A generic CPU is sufficient.
 
-## 3. Installation Guide
-
-Follow these steps to set up your environment cleanly.
-
 ### Folder Structure
 Ensure your folders are organized exactly like this. The code relies on specific relative paths (e.g., `../dataset/`).
 
@@ -66,21 +62,44 @@ project_root/
     └── rgb/               # Folder containing the actual .png images
         ├── image1.png
         └── ...
+```
+## 7 Installation Guide
 
-### Step 1: Get the Code
+### **1. Clone the Repository**
 
-**Option A: Clone via Git**
-Open your terminal (Command Prompt, PowerShell, or Terminal) and run:
 ```bash
 git clone https://github.com/ANIRUDH-999/CS6350.git
-cd YOUR_REPO_NAME
-cd project_root
+cd CS6350
+```
+### **2. Create a Python Virtual Environment**
+```bash
 python -m venv venv
+```
+### **3. Activate the Environment**
+Windows
+```bash
 .\venv\Scripts\activate
+```
+macOS / Linux
+```bash
+source venv/bin/activate
+```
+### **4. Install Dependencies**
+```bash
+pip install -r requirements.txt
+```
 
-## Dataset
-Experiments use only the RGB images from the TUM RGB-D dataset.  
-Depth and camera intrinsics are intentionally excluded to maintain the uncalibrated monocular setting.
-https://cvg.cit.tum.de/data/datasets/rgbd-dataset
-https://cvg.cit.tum.de/data/datasets/rgbd-dataset
+## 8 Run pipeline
+```bash
+cd src
+python data_handling.py
+```
+
+## 8 Dataset setup
+
+[https://cvg.cit.tum.de/data/datasets/rgbd-dataset](https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download)
+
+Download the cabinet dataset and extract the contents into the dataset folder.
+
+In the rgb.txt and groundtruth.txt, delete the first few explanation lines.
 
